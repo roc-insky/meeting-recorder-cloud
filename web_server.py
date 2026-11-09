@@ -485,7 +485,11 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
             "title": meeting_store.get_title(d),
             "transcript": transcript,
             "live": _read_text(d, "live.txt"),
-            "speakers": meeting_store.parse_header(transcript or "")["speakers"],
+            "speakers": meeting_summary.list_speakers(transcript or ""),
+            "suspect_speakers": [
+                s for s in meeting_summary.list_speakers(transcript or "")
+                if meeting_summary.speaker_has_suspect(transcript or "", s)
+            ],
             "annotations": meeting_store.list_annotations(d),
             "active": bool(controller.is_active(d.name)),
         }
@@ -528,7 +532,12 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
     @app.get("/api/meetings/{meeting_id}/speakers")
     def meeting_speakers(meeting_id: str):
         d = meeting_dir(meeting_id)
-        return {"speakers": meeting_summary.list_speakers(_read_text(d, "transcript.md") or "")}
+        text = _read_text(d, "transcript.md") or ""
+        speakers = meeting_summary.list_speakers(text)
+        return {
+            "speakers": speakers,
+            "suspect_speakers": [s for s in speakers if meeting_summary.speaker_has_suspect(text, s)],
+        }
 
     @app.post("/api/meetings/{meeting_id}/summary")
     def meeting_summarize(meeting_id: str, body: dict = Depends(optional_body)):

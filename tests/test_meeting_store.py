@@ -389,30 +389,30 @@ class DeleteTests(StoreTestCase):
 class ParseHeaderTests(unittest.TestCase):
     def test_with_speakers(self):
         text = "# 会议文字稿\n- 开始时间：2026-11-09 10:30\n- 时长：00:10:00\n- 说话人：说话人A、张三、说话人C\n\n[00:00:01] 说话人A: 你好\n"
-        self.assertEqual(meeting_store.parse_header(text), {"speakers": ["说话人A", "张三", "说话人C"]})
+        self.assertEqual(meeting_store.parse_header(text)["speakers"], ["说话人A", "张三", "说话人C"])
 
     def test_without_speakers_line(self):
         text = "# 会议文字稿\n- 开始时间：2026-11-09 10:30\n- 时长：00:10:00\n\n[00:00:01] 你好\n"
-        self.assertEqual(meeting_store.parse_header(text), {"speakers": []})
+        self.assertEqual(meeting_store.parse_header(text)["speakers"], [])
 
     def test_comma_separator_and_whitespace(self):
-        self.assertEqual(meeting_store.parse_header("- 说话人： 甲 , 乙，丙\n"), {"speakers": ["甲", "乙", "丙"]})
+        self.assertEqual(meeting_store.parse_header("- 说话人： 甲 , 乙，丙\n")["speakers"], ["甲", "乙", "丙"])
 
     def test_empty_values_dropped_and_deduped(self):
-        self.assertEqual(meeting_store.parse_header("- 说话人：甲、、乙、甲\n"), {"speakers": ["甲", "乙"]})
+        self.assertEqual(meeting_store.parse_header("- 说话人：甲、、乙、甲\n")["speakers"], ["甲", "乙"])
 
     def test_empty_line_value(self):
-        self.assertEqual(meeting_store.parse_header("- 说话人：\n"), {"speakers": []})
+        self.assertEqual(meeting_store.parse_header("- 说话人：\n")["speakers"], [])
 
     def test_only_header_region_not_body(self):
         text = "# 会议文字稿\n- 时长：00:01:00\n\n[00:00:01] - 说话人：伪造、假\n- 说话人：正文里的\n"
-        self.assertEqual(meeting_store.parse_header(text), {"speakers": []})
+        self.assertEqual(meeting_store.parse_header(text)["speakers"], [])
 
     def test_crlf(self):
-        self.assertEqual(meeting_store.parse_header("# x\r\n- 说话人：甲、乙\r\n"), {"speakers": ["甲", "乙"]})
+        self.assertEqual(meeting_store.parse_header("# x\r\n- 说话人：甲、乙\r\n")["speakers"], ["甲", "乙"])
 
     def test_empty_text(self):
-        self.assertEqual(meeting_store.parse_header(""), {"speakers": []})
+        self.assertEqual(meeting_store.parse_header("")["speakers"], [])
 
     def test_matches_real_render(self):
         import transcribe
@@ -420,6 +420,28 @@ class ParseHeaderTests(unittest.TestCase):
         text = transcribe.render([{"start": 0, "end": 1, "text": "嗨"}], started=datetime(2026, 11, 9, 10, 30),
                                  duration=61, speakers=["说话人A", "说话人B"])
         self.assertEqual(meeting_store.parse_header(text)["speakers"], ["说话人A", "说话人B"])
+
+
+class VoiceScoresHeaderTests(unittest.TestCase):
+    def test_old_format_has_empty_scores(self):
+        h = meeting_store.parse_header("- 说话人：甲、乙\n\n[00:00:01] 甲: 嗨\n")
+        self.assertEqual(h["speakers"], ["甲", "乙"])
+        self.assertEqual(h["voice_scores"], {})
+
+    def test_new_format_and_gray_label(self):
+        text = ("# 会议文字稿\n- 说话人：张三、疑似李四、说话人A\n"
+                "- 声纹匹配：张三 0.62、疑似李四 0.48\n\n[00:00:01] 张三: 嗨\n")
+        h = meeting_store.parse_header(text)
+        self.assertEqual(h["speakers"], ["张三", "疑似李四", "说话人A"])
+        self.assertEqual(h["voice_scores"], {"张三": 0.62, "疑似李四": 0.48})
+
+    def test_malformed_scores_ignored(self):
+        text = "- 声纹匹配：张三 0.62、坏行、李四 abc、王五 1.5\n\n"
+        self.assertEqual(meeting_store.parse_header(text)["voice_scores"], {"张三": 0.62, "王五": 1.5})
+
+    def test_scores_line_only_read_in_header(self):
+        text = "- 说话人：甲\n\n- 声纹匹配：甲 0.9\n"
+        self.assertEqual(meeting_store.parse_header(text)["voice_scores"], {})
 
 
 if __name__ == "__main__":

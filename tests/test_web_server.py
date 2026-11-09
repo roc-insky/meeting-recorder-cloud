@@ -384,6 +384,18 @@ class MeetingRouteTests(AppCase):
         self.assertIsNone(d2["transcript"])
         self.assertIsNone(d2["live"])
         self.assertEqual(d2["speakers"], [])
+        self.assertEqual(d2["suspect_speakers"], [])
+
+    def test_suspect_speakers_merged(self):
+        text = ("# 会议\n- 说话人：张三、疑似张三、说话人A\n- 声纹匹配：张三 0.62、疑似张三 0.48\n\n"
+                "[00:00:01] 张三: 我同意\n[00:00:05] 疑似张三: 我也同意\n[00:00:09] 说话人A: 好\n")
+        self.make_meeting(MID, transcript=text)
+        d = self.client.get(f"/api/meetings/{MID}").json()
+        self.assertEqual(d["speakers"], ["张三", "说话人A"])
+        self.assertEqual(d["suspect_speakers"], ["张三"])
+        s = self.client.get(f"/api/meetings/{MID}/speakers").json()
+        self.assertEqual(s["speakers"], ["张三", "说话人A"])
+        self.assertEqual(s["suspect_speakers"], ["张三"])
 
     def test_rename_and_list_reflects(self):
         self.make_meeting()

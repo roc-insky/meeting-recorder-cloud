@@ -10,6 +10,7 @@
 import re
 
 import meeting_store
+import voiceprint
 
 _LINE = re.compile(r"^\[(\d{2,}:\d{2}:\d{2})\] (.*)$")
 _EMPTY_NOTE = "（未识别到语音）"
@@ -29,8 +30,11 @@ _USER_TEMPLATE = (
 
 
 def _parse_lines(text: str):
-    """逐条解析发言行，返回 [(说话人或 "", 内容)]；表头与空行、无法识别的行忽略。"""
-    speakers = meeting_store.parse_header(text)["speakers"]
+    """逐条解析发言行，返回 [(说话人或 "", 内容, 是否疑似)]；表头与空行、无法识别的行忽略。
+
+    表头里的「疑似X」会并到 X 名下，第三项标记该段来自疑似聚类。
+    """
+    labels = meeting_store.parse_header(text)["speakers"]
     out = []
     in_body = False
     for line in text.splitlines():
@@ -42,24 +46,40 @@ def _parse_lines(text: str):
         if not m:
             continue
         body = m.group(2)
-        name = ""
-        for sp in speakers:                     # 说话人名可能含冒号，故按已知名字前缀匹配
+        name, suspect = "", False
+        for sp in labels:                       # 说话人名可能含冒号，故按已知名字前缀匹配
             if body.startswith(sp + ": "):
-                name, body = sp, body[len(sp) + 2:]
+                base, suspect = voiceprint.parse_label(sp)
+                name, body = base, body[len(sp) + 2:]
                 break
         if body.strip() and body.strip() != _EMPTY_NOTE:
-            out.append((name, body.strip()))
+            out.append((name, body.strip(), suspect))
     return out
 
 
 def list_speakers(transcript_text: str) -> list[str]:
-    """表头里的说话人列表；没有表头说话人行返回 []。"""
-    return meeting_store.parse_header(transcript_text or "")["speakers"]
+    """表头里的说话人列表（「疑似X」并到 X，去重保序）；没有表头说话人行返回 []。"""
+    names: list[str] = []
+    for label in meeting_store.parse_header(transcript_text or "")["speakers"]:
+        base = voiceprint.parse_label(label)[0]
+        if base and base not in names:
+            names.append(base)
+    return names
 
 
 def speech_of(transcript_text: str, speaker: str) -> str:
-    """某位说话人的全部发言，段与段之间空一行；该说话人不存在返回 ""。"""
-    return "\n\n".join(body for name, body in _parse_lines(transcript_text or "") if name == speaker)
+    """某位说话人的全部发言（含「疑似」聚类的段），段与段之间空一行；该说话人不存在返回 ""。"""
+    return "\n\n".join(
+        body for name, body, _suspect in _parse_lines(transcript_text or "") if name == speaker
+    )
+
+
+def speaker_has_suspect(transcript_text: str, speaker: str) -> bool:
+    """该说话人是否有至少一段发言来自「疑似」聚类。"""
+    return any(
+        suspect for name, body, suspect in _parse_lines(transcript_text or "")
+        if name == speaker and body
+    )
 
 
 def speech_sections(transcript_text: str, speakers=None) -> list[tuple[str, str]]:
@@ -70,7 +90,7 @@ def speech_sections(transcript_text: str, speakers=None) -> list[tuple[str, str]
     text = transcript_text or ""
     known = list_speakers(text)
     if speakers is None:
-        names = known + ([""] if any(n == "" for n, _ in _parse_lines(text)) else [])
+        names = known + ([""] if any(n == "" for n, _s, _x in _parse_lines(text)) else [])
     else:
         unknown = [s for s in speakers if s not in known]
         if unknown:

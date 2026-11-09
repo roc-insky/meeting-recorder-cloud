@@ -90,8 +90,11 @@ def assign_speakers(segs: list, turns: list) -> list:
     return result
 
 
-def render(segs: list, *, started: datetime, duration: float, speakers=None, assigned=None) -> str:
-    """渲染文字稿。speakers 非 None 时表头加说话人行；assigned 给出时按其附加说话人标签。"""
+def render(segs: list, *, started: datetime, duration: float, speakers=None, assigned=None, scores=None) -> str:
+    """渲染文字稿。speakers 非 None 时表头加说话人行；assigned 给出时按其附加说话人标签。
+
+    scores 非空时在说话人行之后再加一行「- 声纹匹配：」；为空时输出与旧版逐字相同。
+    """
     lines = [
         "# 会议文字稿",
         f"- 开始时间：{started.strftime('%Y-%m-%d %H:%M')}",
@@ -99,6 +102,8 @@ def render(segs: list, *, started: datetime, duration: float, speakers=None, ass
     ]
     if speakers is not None:
         lines.append("- 说话人：" + "、".join(speakers))
+    if scores:
+        lines.append("- 声纹匹配：" + "、".join(f"{name} {score:.2f}" for name, score in scores.items()))
     lines.append("")
     pairs = assigned if assigned is not None else [(s, None) for s in segs]
     if not pairs:
@@ -147,15 +152,14 @@ def _apply_voiceprint(turns, samples16k, thresholds, deps, stderr):
     try:
         profiles = voiceprint.load_profiles(stderr=stderr)
         if not profiles:
-            return turns
+            return turns, {}
         extractor = deps.get("extractor") or voiceprint.default_extractor()
-        labeled, _scores = voiceprint.label_turns_with_scores(
+        return voiceprint.label_turns_with_scores(
             turns, samples16k, profiles=profiles, extractor=extractor, thresholds=thresholds
         )
-        return labeled
     except Exception as e:  # 声纹失败不影响说话人区分结果
         print(f"警告：声纹识别失败，已保留说话人A/B 标签（{e}）", file=stderr)
-        return turns
+        return turns, {}
 
 
 def transcribe_wav(
@@ -206,6 +210,7 @@ def transcribe_wav(
             print(f"警告：说话人模型下载失败，已输出无标签文字稿（{e.__cause__}）", file=stderr)
         except Exception as e:  # 区分失败不影响文字稿
             print(f"警告：说话人区分失败，已输出无标签文字稿（{e}）", file=stderr)
+        voice_scores = {}
         if turns and voice:
             # 声纹识别用独立的 try/except（在 _apply_voiceprint 内），失败不影响区分结果
             if thresholds is not None:
@@ -214,17 +219,19 @@ def transcribe_wav(
                 th = voiceprint.Thresholds(voice_threshold, voice_threshold)  # 旧单阈值语义，无灰区
             else:
                 th = voiceprint.Thresholds(voiceprint.DEFAULT_HIGH, voiceprint.DEFAULT_LOW)
-            turns = _apply_voiceprint(turns, samples16k, th, deps, stderr)
+            turns, voice_scores = _apply_voiceprint(turns, samples16k, th, deps, stderr)
         try:
             assigned = assign_speakers(segs, turns or [])
             found = sorted({spk for _s, spk in assigned if spk is not None}, key=_speaker_sort_key)
             if found:
+                labels = [speaker_label(s) for s in found]
                 return render(
                     segs,
                     started=started,
                     duration=duration,
-                    speakers=[speaker_label(s) for s in found],
+                    speakers=labels,
                     assigned=assigned,
+                    scores={k: v for k, v in voice_scores.items() if k in labels},
                 )
         except Exception as e:
             print(f"警告：说话人区分失败，已输出无标签文字稿（{e}）", file=stderr)

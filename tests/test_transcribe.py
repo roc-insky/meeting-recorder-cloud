@@ -111,6 +111,19 @@ class RenderTest(unittest.TestCase):
         self.assertIn("[00:00:03] 说话人A: 你好\n", out)
         self.assertIn("[00:00:05] 嗯\n", out)
 
+    def test_render_scores_line(self):
+        segs = [{"start": 3.0, "end": 4.0, "text": "你好"}]
+        out = transcribe.render(
+            segs, started=self.STARTED, duration=10, speakers=["张三", "疑似李四"],
+            assigned=[(segs[0], 0)], scores={"张三": 0.62, "疑似李四": 0.48},
+        )
+        self.assertIn("- 说话人：张三、疑似李四\n- 声纹匹配：张三 0.62、疑似李四 0.48\n", out)
+
+    def test_render_no_scores_byte_identical(self):
+        segs = [{"start": 3.0, "end": 4.0, "text": "你好"}]
+        args = dict(started=self.STARTED, duration=10, speakers=["说话人A"], assigned=[(segs[0], 0)])
+        self.assertEqual(transcribe.render(segs, **args), transcribe.render(segs, scores={}, **args))
+
     def test_render_empty(self):
         out = transcribe.render([], started=self.STARTED, duration=0)
         self.assertEqual(

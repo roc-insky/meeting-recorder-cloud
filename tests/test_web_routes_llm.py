@@ -52,13 +52,15 @@ class SpeakersRouteTests(LlmCase):
         self.make_meeting(transcript=TRANSCRIPT)
         r = self.client.get(f"/api/meetings/{MID}/speakers")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), {"speakers": ["说话人A", "小王"]})
+        self.assertEqual(r.json(), {"speakers": ["说话人A", "小王"], "suspect_speakers": []})
 
     def test_speakers_anonymous_and_missing_transcript(self):
         self.make_meeting(transcript=ANON)
-        self.assertEqual(self.client.get(f"/api/meetings/{MID}/speakers").json(), {"speakers": []})
+        self.assertEqual(self.client.get(f"/api/meetings/{MID}/speakers").json(),
+                         {"speakers": [], "suspect_speakers": []})
         self.make_meeting("2026-11-09_1100")
-        self.assertEqual(self.client.get("/api/meetings/2026-11-09_1100/speakers").json(), {"speakers": []})
+        self.assertEqual(self.client.get("/api/meetings/2026-11-09_1100/speakers").json(),
+                         {"speakers": [], "suspect_speakers": []})
 
     def test_unknown_meeting_404(self):
         self.assertEqual(self.client.get("/api/meetings/nope/speakers").status_code, 404)

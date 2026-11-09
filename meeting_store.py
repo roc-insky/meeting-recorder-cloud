@@ -14,6 +14,7 @@ _META = "meta.json"
 _ANNOTATIONS = "annotations.json"
 _TRANSCRIPT = "transcript.md"
 _SPEAKERS_PREFIX = "- 说话人："
+_VOICE_PREFIX = "- 声纹匹配："
 _LINE_BREAKS = ("\n", "\r", "\x0b", "\x0c", "\x85", "\u2028", "\u2029")
 
 # 标注是「读—改—写」，同进程内用一把锁串行化，避免并发丢更新
@@ -190,8 +191,13 @@ def delete_meeting(root: Path, meeting_id) -> None:
 
 
 def parse_header(text: str) -> dict:
-    """解析文字稿表头（首个空行之前）的「- 说话人：」行，返回 {"speakers": [...]}；无该行为空列表。"""
+    """解析文字稿表头（首个空行之前）。
+
+    返回 {"speakers": [...]（含「疑似」前缀原文）, "voice_scores": {标签: 分数}}；
+    没有对应行时分别为空列表与空字典。声纹匹配行里无法解析的项直接跳过。
+    """
     speakers: list[str] = []
+    scores: dict[str, float] = {}
     for line in text.splitlines():
         if not line.strip():  # 表头以首个空行结束
             break
@@ -201,5 +207,14 @@ def parse_header(text: str) -> dict:
                 name = name.strip()
                 if name and name not in speakers:
                     speakers.append(name)
-            break
-    return {"speakers": speakers}
+        elif line.startswith(_VOICE_PREFIX):
+            value = line[len(_VOICE_PREFIX):].replace("，", "、").replace(",", "、")
+            for item in value.split("、"):
+                parts = item.strip().rsplit(None, 1)
+                if len(parts) != 2 or not parts[0]:
+                    continue
+                try:
+                    scores[parts[0]] = float(parts[1])
+                except ValueError:
+                    continue
+    return {"speakers": speakers, "voice_scores": scores}
