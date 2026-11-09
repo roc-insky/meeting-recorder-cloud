@@ -7,10 +7,13 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from unittest import mock
+
 import numpy as np
 
 import common
 import transcribe
+import voiceprint
 
 
 def write_wav(path: Path, samples: np.ndarray, rate: int = 16000) -> None:
@@ -251,6 +254,130 @@ class TranscribeWavTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             transcribe.main(["x.wav", "--speakers", "2", "--no-diarize"])
         self.assertEqual(cm.exception.code, 2)
+
+
+class VoiceprintIntegrationTest(unittest.TestCase):
+    """声纹串联：PROFILE_DIR 指向临时目录；无声纹时输出与改动前逐字一致。"""
+
+    FAKE = staticmethod(lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": "你好", "no_speech_prob": 0.0}]})
+    STARTED = datetime(2026, 11, 9, 10, 30)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.profiles = self.dir / "voiceprints"
+        patcher = mock.patch.object(voiceprint, "PROFILE_DIR", self.profiles)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.wav = self.dir / "meeting.wav"
+        write_wav(self.wav, tone(2.0))
+
+    def deps(self, **extra):
+        base = {"transcribe_fn": self.FAKE, "diarize_fn": lambda s, r, n: [(0.0, 2.0, 1)], "started": self.STARTED}
+        base.update(extra)
+        return base
+
+    def test_transcript_unchanged_without_profiles(self):
+        err = io.StringIO()
+
+        def boom():
+            raise AssertionError("无声纹时不应加载嵌入模型")
+
+        with mock.patch.object(voiceprint, "default_extractor", boom):
+            out = transcribe.transcribe_wav(self.wav, model="m", deps=self.deps(stderr=err))
+        golden = (
+            "# 会议文字稿\n- 开始时间：2026-11-09 10:30\n- 时长：00:00:02\n- 说话人：说话人B\n\n"
+            "[00:00:00] 说话人B: 你好\n"
+        )
+        self.assertEqual(out, golden)
+        self.assertEqual(err.getvalue(), "")
+        self.assertFalse(self.profiles.exists())  # 不创建声纹目录
+
+    def test_voiceprint_renames_cluster(self):
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        err = io.StringIO()
+        out = transcribe.transcribe_wav(
+            self.wav, model="m", deps=self.deps(stderr=err, extractor=lambda x: np.eye(512)[0])
+        )
+        self.assertIn("- 说话人：张三", out)
+        self.assertIn("[00:00:00] 张三: 你好", out)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_no_voiceprint_flag_skips(self):
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+
+        def boom(x):
+            raise AssertionError("--no-voiceprint 不应提取")
+
+        code = transcribe.main([str(self.wav), "--no-voiceprint"], deps=self.deps(extractor=boom))
+        self.assertEqual(code, 0)
+        text = (self.dir / "transcript.md").read_text(encoding="utf-8")
+        self.assertIn("说话人B: 你好", text)
+
+    def test_voice_threshold_option(self):
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        ext = lambda x: np.eye(512)[1]  # 与声纹正交，分数 0
+        code = transcribe.main([str(self.wav), "--voice-threshold", "0.5"], deps=self.deps(extractor=ext))
+        self.assertEqual(code, 0)
+        self.assertIn("说话人B: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
+        code = transcribe.main([str(self.wav), "--voice-threshold", "-1"], deps=self.deps(extractor=ext))
+        self.assertEqual(code, 0)
+        self.assertIn("张三: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
+
+    def test_voiceprint_failure_keeps_diarize_labels(self):
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+
+        def boom(x):
+            raise RuntimeError("模型坏了")
+
+        err = io.StringIO()
+        out = transcribe.transcribe_wav(self.wav, model="m", deps=self.deps(stderr=err, extractor=boom))
+        self.assertIn("[00:00:00] 说话人B: 你好", out)  # 区分结果保留
+        self.assertIn("警告：声纹识别失败", err.getvalue())
+        self.assertNotIn("区分失败", err.getvalue())
+
+    def test_default_extractor_failure_keeps_diarize_labels(self):
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+
+        def no_model():
+            raise OSError("无网络")
+
+        err = io.StringIO()
+        with mock.patch.object(voiceprint, "default_extractor", no_model):
+            out = transcribe.transcribe_wav(self.wav, model="m", deps=self.deps(stderr=err))
+        self.assertIn("说话人B: 你好", out)
+        self.assertIn("声纹识别失败", err.getvalue())
+
+    def test_corrupt_profile_warns_and_keeps_labels(self):
+        self.profiles.mkdir()
+        (self.profiles / "坏.json").write_text("{", encoding="utf-8")
+        err = io.StringIO()
+        out = transcribe.transcribe_wav(self.wav, model="m", deps=self.deps(stderr=err))
+        self.assertIn("说话人B: 你好", out)
+        self.assertIn("坏.json", err.getvalue())
+
+    def test_diarize_failure_skips_voiceprint(self):
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+
+        def boom(s, r, n):
+            raise RuntimeError("坏了")
+
+        def no_extract(x):
+            raise AssertionError("区分失败时不应做声纹识别")
+
+        err = io.StringIO()
+        out = transcribe.transcribe_wav(self.wav, model="m", deps=self.deps(stderr=err, diarize_fn=boom, extractor=no_extract))
+        self.assertNotIn("说话人", out)
+        self.assertIn("区分失败", err.getvalue())
+
+    def test_no_voice_flags_in_parser(self):
+        args = transcribe.build_parser().parse_args(["x.wav", "--no-voiceprint", "--voice-threshold", "0.7"])
+        self.assertTrue(args.no_voiceprint)
+        self.assertEqual(args.voice_threshold, 0.7)
+        args = transcribe.build_parser().parse_args(["x.wav"])
+        self.assertFalse(args.no_voiceprint)
+        self.assertEqual(args.voice_threshold, voiceprint.DEFAULT_THRESHOLD)
 
 
 if __name__ == "__main__":

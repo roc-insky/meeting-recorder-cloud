@@ -3,6 +3,7 @@
 deps 字典（均可选，便于测试与后续扩展，新增键不影响旧调用）：
   transcribe_fn(audio, **kwargs) -> {"segments": [...]}   替换 mlx_whisper.transcribe
   diarize_fn(samples_int16, rate, speakers) -> list[Turn]  说话人区分；缺省用 _default_diarize_fn（延迟导入 diarize，必要时下载模型）
+  extractor(samples_float32) -> 向量                       声纹提取；缺省用 voiceprint.default_extractor（仅在已登记声纹时才延迟加载）
   stderr                                                   警告输出流，默认 sys.stderr
   started                                                  会议开始时间（datetime），默认由 wav 修改时间推算
 """
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 import common
+import voiceprint
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 NO_SPEECH_THRESHOLD = 0.6
@@ -135,10 +137,38 @@ def _speaker_sort_key(spk):
     return (isinstance(spk, str), spk)
 
 
-def transcribe_wav(wav: Path, *, model: str = DEFAULT_MODEL, speakers=None, diarize: bool = True, deps=None) -> str:
+def _apply_voiceprint(turns, samples16k, threshold, deps, stderr):
+    """用已登记声纹给说话人聚类改名；任何失败只警告并原样返回 turns。
+
+    没有登记声纹时直接返回，不创建 extractor（不加载嵌入模型）。
+    """
+    try:
+        profiles = voiceprint.load_profiles(stderr=stderr)
+        if not profiles:
+            return turns
+        extractor = deps.get("extractor") or voiceprint.default_extractor()
+        return voiceprint.label_turns(
+            turns, samples16k, profiles=profiles, extractor=extractor, threshold=threshold
+        )
+    except Exception as e:  # 声纹失败不影响说话人区分结果
+        print(f"警告：声纹识别失败，已保留说话人A/B 标签（{e}）", file=stderr)
+        return turns
+
+
+def transcribe_wav(
+    wav: Path,
+    *,
+    model: str = DEFAULT_MODEL,
+    speakers=None,
+    diarize: bool = True,
+    voice: bool = True,
+    voice_threshold: float = voiceprint.DEFAULT_THRESHOLD,
+    deps=None,
+) -> str:
     """转写 wav 并返回文字稿文本。
 
-    零长度或静音不调用模型；说话人区分出错只警告并退回无标签文字稿。
+    零长度或静音不调用模型；说话人区分出错只警告并退回无标签文字稿；
+    声纹识别出错只警告并保留说话人A/B 标签。
     """
     deps = deps or {}
     stderr = deps.get("stderr", sys.stderr)
@@ -164,9 +194,18 @@ def transcribe_wav(wav: Path, *, model: str = DEFAULT_MODEL, speakers=None, diar
 
     diarize_fn = deps.get("diarize_fn") or _default_diarize_fn
     if diarize and segs:
+        turns = None
         try:
             turns = diarize_fn(samples16k, common.SAMPLE_RATE, speakers)
-            assigned = assign_speakers(segs, turns)
+        except _ModelDownloadError as e:
+            print(f"警告：说话人模型下载失败，已输出无标签文字稿（{e.__cause__}）", file=stderr)
+        except Exception as e:  # 区分失败不影响文字稿
+            print(f"警告：说话人区分失败，已输出无标签文字稿（{e}）", file=stderr)
+        if turns and voice:
+            # 声纹识别用独立的 try/except（在 _apply_voiceprint 内），失败不影响区分结果
+            turns = _apply_voiceprint(turns, samples16k, voice_threshold, deps, stderr)
+        try:
+            assigned = assign_speakers(segs, turns or [])
             found = sorted({spk for _s, spk in assigned if spk is not None}, key=_speaker_sort_key)
             if found:
                 return render(
@@ -176,11 +215,8 @@ def transcribe_wav(wav: Path, *, model: str = DEFAULT_MODEL, speakers=None, diar
                     speakers=[speaker_label(s) for s in found],
                     assigned=assigned,
                 )
-        except _ModelDownloadError as e:
-            print(f"警告：说话人模型下载失败，已输出无标签文字稿（{e.__cause__}）", file=stderr)
-        except Exception as e:  # 区分失败不影响文字稿
+        except Exception as e:
             print(f"警告：说话人区分失败，已输出无标签文字稿（{e}）", file=stderr)
-    # 声纹识别（后续任务）在此处用独立的 try/except，不要并入上面的区分流程
     return render(segs, started=started, duration=duration)
 
 
@@ -207,6 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--speakers", type=_positive_int, metavar="N", help="指定说话人数（整数 ≥1）")
     group.add_argument("--no-diarize", action="store_true", help="不区分说话人")
     p.add_argument("--model", default=DEFAULT_MODEL, help="转写模型")
+    p.add_argument("--no-voiceprint", action="store_true", help="不做声纹识别")
+    p.add_argument("--voice-threshold", type=float, metavar="X", default=voiceprint.DEFAULT_THRESHOLD,
+                   help=f"声纹相似度阈值（默认 {voiceprint.DEFAULT_THRESHOLD}，未校准）")
     return p
 
 
@@ -221,7 +260,13 @@ def main(argv=None, *, deps=None) -> int:
         return 1
     try:
         text = transcribe_wav(
-            wav, model=args.model, speakers=args.speakers, diarize=not args.no_diarize, deps=deps
+            wav,
+            model=args.model,
+            speakers=args.speakers,
+            diarize=not args.no_diarize,
+            voice=not args.no_voiceprint,
+            voice_threshold=args.voice_threshold,
+            deps=deps,
         )
         common.atomic_write_text(wav.parent / "transcript.md", text)
     except Exception as e:
