@@ -9,11 +9,13 @@ import unittest
 import wave
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 import common
 import record
+import voiceprint
 
 
 def tone(seconds: float = 1.0, amp: int = 3000) -> np.ndarray:
@@ -311,6 +313,14 @@ class CompressTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def setUp(self):
+        # 隔离声纹目录：main 会走到 transcribe，不能读到开发机上真实登记的声纹
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.object(voiceprint, "PROFILE_DIR", Path(self._tmp.name) / "no-voiceprints")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_deps(self, d, chunks, **extra):
         stop = threading.Event()
         runs = []

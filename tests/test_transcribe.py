@@ -124,6 +124,10 @@ class TranscribeWavTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
+        # 隔离声纹目录，防止读到开发机上真实登记的声纹
+        patcher = mock.patch.object(voiceprint, "PROFILE_DIR", self.dir / "no-voiceprints")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_zero_length_wav_no_model_call(self):
         wav = self.dir / "meeting.wav"

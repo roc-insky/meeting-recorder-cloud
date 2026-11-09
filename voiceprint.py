@@ -28,7 +28,7 @@ MIN_CLUSTER_SECONDS = 1.0   # 聚类音频不足这么长就不参与识别
 FRAME_S = 0.1               # 去静音时的分帧长度
 MIN_TAIL_S = 1.0            # 登记时切块后，太短的尾巴丢弃
 
-_NAME_RE = re.compile(r"[0-9A-Za-z_\-\u3400-\u4dbf\u4e00-\u9fff]+")
+_NAME_RE = re.compile(r"[\w-]+")  # \w 含各国文字与数字、下划线，不含 / . 和空白
 
 
 class VoiceprintError(ValueError):
@@ -36,13 +36,13 @@ class VoiceprintError(ValueError):
 
 
 def validate_name(name: str) -> str:
-    """校验声纹名字：字母/数字/汉字/下划线/连字符，1–20 字，不能以“说话人”开头。返回原名字。"""
+    """校验声纹名字：字母/数字/中日韩文字/下划线/连字符，1–20 字，不能以“说话人”开头。返回原名字。"""
     if not isinstance(name, str) or not name:
         raise VoiceprintError("名字不能为空")
     if len(name) > NAME_MAX_LEN:
         raise VoiceprintError(f"名字最多 {NAME_MAX_LEN} 个字")
     if not _NAME_RE.fullmatch(name):
-        raise VoiceprintError("名字只能含字母、数字、汉字、下划线和连字符")
+        raise VoiceprintError("名字只能含字母、数字、文字、下划线和连字符")
     if name.startswith(RESERVED_PREFIX):
         raise VoiceprintError(f"名字不能以“{RESERVED_PREFIX}”开头")
     return name

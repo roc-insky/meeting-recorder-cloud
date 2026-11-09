@@ -46,9 +46,9 @@ class TmpProfileDirTest(unittest.TestCase):
 
 class ValidateNameTest(unittest.TestCase):
     def test_validate_name(self):
-        for ok in ("张三", "a_b-1", "Bob", "李" * 20):
+        for ok in ("张三", "a_b-1", "Bob", "李" * 20, "田中", "さくら", "김민", "José", "Ольга"):
             self.assertEqual(voiceprint.validate_name(ok), ok)
-        for bad in ("", "李" * 21, "说话人A", "说话人", "a b", "a/b", "../x", "a.b", " 张三"):
+        for bad in ("", "李" * 21, "说话人A", "说话人", "a b", "a/b", "../x", "a.b", " 张三", "a\nb", "张三\n", "a\\b", "a:b"):
             with self.assertRaises(voiceprint.VoiceprintError, msg=repr(bad)):
                 voiceprint.validate_name(bad)
 
