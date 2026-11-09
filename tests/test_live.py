@@ -87,6 +87,30 @@ class ModelsTest(unittest.TestCase):
             (d / live.VAD_FILE).write_bytes(b"x" * live.VAD_MIN_BYTES)
             self.assertEqual(live.models_present(d), [])
 
+    @staticmethod
+    def snapshot(d):
+        return sorted(
+            (str(p.relative_to(d)), p.stat().st_size if p.is_file() else -1) for p in d.rglob("*")
+        )
+
+    def test_models_present_is_read_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            for size in (0, 10, live.VAD_MIN_BYTES):
+                (d / live.VAD_FILE).write_bytes(b"x" * size)
+                before = self.snapshot(d)
+                live.models_present(d)
+                self.assertEqual(self.snapshot(d), before)
+
+    def test_ensure_reuses_models_present_without_download(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / live.VAD_FILE).write_bytes(b"x" * live.VAD_MIN_BYTES)
+            before = self.snapshot(d)
+            path = live.ensure_vad_model(d, download=lambda u, p: self.fail("模型已存在，不应下载"))
+            self.assertEqual(path, d / live.VAD_FILE)
+            self.assertEqual(self.snapshot(d), before)
+
     def test_ensure_vad_model_downloads_atomically(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d) / "models"

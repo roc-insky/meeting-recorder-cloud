@@ -28,7 +28,7 @@ QUEUE_MAX = 5
 STOP_TIMEOUT_S = 10.0
 
 
-def models_present(cache_dir: Path) -> list:
+def models_present(cache_dir: Path) -> list[str]:
     """返回缺失的模型文件名（小于 VAD_MIN_BYTES 视为缺失或损坏）。只读，不联网、不创建目录。"""
     try:
         ok = (Path(cache_dir) / VAD_FILE).stat().st_size >= VAD_MIN_BYTES

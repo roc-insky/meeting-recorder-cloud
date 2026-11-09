@@ -60,7 +60,9 @@ class ModelsPresentTest(unittest.TestCase):
     def test_zero_byte_counts_missing(self):
         self.fill()
         (self.dir / diarize.EMBEDDING_FILE).write_bytes(b"")
+        before = self.snapshot()
         self.assertEqual(diarize.models_present(self.dir), [diarize.EMBEDDING_FILE])
+        self.assertEqual(self.snapshot(), before)
 
     def test_nonexistent_dir_not_created(self):
         missing = self.dir / "no" / "such"
@@ -106,6 +108,22 @@ class EnsureModelsTest(unittest.TestCase):
         calls.clear()
         diarize.ensure_models(self.dir, download=dl)
         self.assertEqual(calls, [])
+
+    def snapshot(self):
+        return sorted(
+            (str(p.relative_to(self.dir)), p.stat().st_size if p.is_file() else -1)
+            for p in self.dir.rglob("*")
+        )
+
+    def test_ensure_reuses_models_present_and_skips_download(self):
+        diarize.ensure_models(self.dir, download=fake_download)
+        before = self.snapshot()
+        seg, emb = diarize.ensure_models(
+            self.dir, download=lambda u, d: self.fail("模型齐全时不应下载")
+        )
+        self.assertEqual(seg, self.dir / diarize.SEGMENTATION_FILE)
+        self.assertEqual(emb, self.dir / diarize.EMBEDDING_FILE)
+        self.assertEqual(self.snapshot(), before)
 
     def test_urls(self):
         urls = []

@@ -22,7 +22,7 @@ AUTO_THRESHOLD = 0.5  # 未指定人数时的聚类阈值
 SAMPLE_RATE = 16000
 
 
-def models_present(cache_dir: Path) -> list:
+def models_present(cache_dir: Path) -> list[str]:
     """返回缺失的模型相对路径（0 字节也算缺失）。只读，不联网、不创建目录。"""
     cache_dir = Path(cache_dir)
     missing = []
