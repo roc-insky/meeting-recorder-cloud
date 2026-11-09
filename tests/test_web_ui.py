@@ -2,7 +2,10 @@
 
 真正的页面行为（录音、转写、标注定位、弹窗）需要真实浏览器和麦克风，见 README「验收记录」。
 """
+import json
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -248,6 +251,39 @@ class StaticFilesTest(unittest.TestCase):
         self.assertLess(start.index("api('POST', '/api/recording/start'"), start.index("beginRecordingView("))
         begin = re.search(r"function beginRecordingView\(.*?\n\}\n", js, re.S).group(0)
         self.assertIn("clearView()", begin)
+
+
+    def test_job_save_response_after_selection_change_is_ignored_structure(self):
+        """结构断言：保存/删除前记录选择版本，响应回来只在版本未变时才改 currentId / 重置表单。"""
+        js = read("interview.js")
+        self.assertRegex(js, r"rev:\s*0")
+        for name in ("resetJobForm", "editJob"):
+            body = re.search(r"function %s\(.*?\n\}\n" % name, js, re.S).group(0)
+            self.assertIn("J.rev += 1", body, name)
+        save = re.search(r"async function saveJob\(.*?\n\}\n", js, re.S).group(0)
+        self.assertLess(save.index("const rev = J.rev"), save.index("await api("))
+        self.assertRegex(save, r"if \(J\.rev === rev\) \{\s*J\.currentId = saved\.id")
+        self.assertNotRegex(save, r"encodeURIComponent\(J\.currentId\)")   # PUT 必须用请求发出时的 id
+        delete = re.search(r"async function deleteJob\(.*?\n\}\n", js, re.S).group(0)
+        self.assertIn("if (J.rev === rev) resetJobForm()", delete)
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node")
+    def test_job_save_race_runs_real_interview_js(self):
+        """在 node vm 里执行真实的 interview.js（假 DOM）：保存 A 期间切到 B，A 的响应不得改走选择。"""
+        harness = Path(__file__).resolve().parent / "job_race_harness.js"
+        res = subprocess.run(["node", str(harness)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = json.loads(res.stdout)
+        # 场景 1：选择仍是 B，表单仍显示 B；随后保存必须是对 B 的 PUT，不是覆盖 A
+        self.assertEqual(out["afterSwitch"], {"currentId": "B", "title": "职位B", "req": "rb"})
+        self.assertEqual(out["secondSave"]["url"], "/api/jobs/B")
+        self.assertEqual(out["secondSave"]["body"]["title"], "职位B")
+        # 场景 2：新建保存期间切到 A，新职位只出现在列表里，不抢选择
+        self.assertEqual(out["afterCreateSwitch"], {"currentId": "A", "title": "职位A"})
+        # 场景 3：选择没变时，新建的职位照常成为当前职位
+        self.assertEqual(out["afterCreateSame"], {"currentId": "NEW2"})
+        # 场景 4：删除期间切到 B，不得重置 B 的表单
+        self.assertEqual(out["afterDeleteSwitch"], {"currentId": "B", "title": "职位B"})
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ const SANITIZE_OPTIONS = {
 const J = {
   jobs: [],
   currentId: null,      // 当前编辑的职位 id；null 表示新建
+  rev: 0,               // 选择/表单版本：每次切换职位或重置表单加一；异步响应回来时据此判断选择是否已变
   images: [],           // [{dataUri, name}]
   statusMsg: '',
   loaded: false,
@@ -79,6 +80,7 @@ function renderJobs() {
 }
 
 function resetJobForm() {
+  J.rev += 1;
   J.currentId = null;
   J.statusMsg = '';
   $('job-form-title').textContent = '新建职位';
@@ -93,6 +95,7 @@ function resetJobForm() {
 function editJob(id) {
   const job = J.jobs.find((j) => j.id === id);
   if (!job) return;
+  J.rev += 1;
   J.currentId = id;
   J.statusMsg = '';
   $('job-form-title').textContent = '编辑职位';
@@ -112,13 +115,19 @@ async function saveJob(ev) {
     $('job-title').focus();
     return;
   }
+  // 请求发出时记下“保存的是哪一份”和选择版本；响应回来时选择若已变（切到了别的职位/点了新建），
+  // 绝不能再改 currentId 或表单，否则下次保存会用别的内容覆盖这份职位
+  const rev = J.rev;
+  const targetId = J.currentId;
   await busy('job', [$('job-save')], async () => {
     try {
       let saved;
-      if (J.currentId === null) saved = await api('POST', '/api/jobs', body);
-      else saved = await api('PUT', '/api/jobs/' + encodeURIComponent(J.currentId), body);
-      J.currentId = saved.id;
-      $('job-form-title').textContent = '编辑职位';
+      if (targetId === null) saved = await api('POST', '/api/jobs', body);
+      else saved = await api('PUT', '/api/jobs/' + encodeURIComponent(targetId), body);
+      if (J.rev === rev) {
+        J.currentId = saved.id;
+        $('job-form-title').textContent = '编辑职位';
+      }
       toast('职位已保存');
       await loadJobs();
     } catch (e) {
@@ -132,11 +141,12 @@ async function deleteJob() {
   if (id === null) return;
   const job = J.jobs.find((j) => j.id === id);
   if (!window.confirm('确定删除职位“' + (job ? job.title : '') + '”？')) return;
+  const rev = J.rev;
   await busy('job', [$('job-delete')], async () => {
     try {
       await api('DELETE', '/api/jobs/' + encodeURIComponent(id));
       toast('职位已删除');
-      resetJobForm();
+      if (J.rev === rev) resetJobForm();      // 删除期间已切到别的职位就保持当前选择，只刷新列表
       await loadJobs();
     } catch (e) {
       toast(errText(e), true);
