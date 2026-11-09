@@ -278,6 +278,84 @@ class DefaultImplementationTests(ServiceCase):
         self.assertFalse(voiceprint.profile_path("赵六").exists())
 
 
+class CancelCommitRaceTests(ServiceCase):
+    """取消与保存提交点互斥：绝不出现“状态 cancelled 但声纹已落盘”。"""
+
+    def extractor(self, samples):
+        return np.array([1.0, 0.5, 0.2, 0.1], dtype=np.float32)
+
+    def test_cancel_while_save_in_flight_ends_completed(self):
+        f = self.tmp / "a.wav"
+        write_wav(f, speech(12))
+        real_save = voiceprint.save_profile
+        in_save, release = threading.Event(), threading.Event()
+
+        def blocking_save(*a, **kw):
+            in_save.set()
+            self.assertTrue(release.wait(WAIT))
+            return real_save(*a, **kw)
+
+        svc = VoiceprintService(extractor=self.extractor)
+        self.addCleanup(svc.close)
+        self.addCleanup(release.set)
+        with mock.patch.object(voiceprint, "save_profile", blocking_save):
+            job = svc.start_import("王五", f, False)
+            self.assertTrue(in_save.wait(WAIT))
+            self.assertFalse(svc.cancel(job))     # 已在落盘，取消无效
+            release.set()
+            self.wait_state(svc, job, "completed")
+        self.assertTrue(svc.join(WAIT))
+        self.assertTrue(voiceprint.profile_path("王五").exists())
+
+    def test_cancel_before_commit_saves_nothing(self):
+        f = self.tmp / "a.wav"
+        write_wav(f, speech(12))
+        in_extract, release = threading.Event(), threading.Event()
+
+        def slow_extractor(samples):
+            in_extract.set()
+            self.assertTrue(release.wait(WAIT))
+            return self.extractor(samples)
+
+        svc = VoiceprintService(extractor=slow_extractor)
+        self.addCleanup(svc.close)
+        self.addCleanup(release.set)
+        job = svc.start_import("王五", f, False)
+        self.assertTrue(in_extract.wait(WAIT))
+        self.assertTrue(svc.cancel(job))
+        release.set()
+        self.assertTrue(svc.join(WAIT))
+        self.assertEqual(svc.status(job)["state"], "cancelled")
+        self.assertFalse(voiceprint.profile_path("王五").exists())
+
+    def test_cancel_after_stop_check_cannot_replace_existing_profile(self):
+        """旧代码：stop 检查通过后、保存前取消 → 状态 cancelled 但旧声纹被替换。"""
+        f = self.tmp / "a.wav"
+        write_wav(f, speech(12))
+        voiceprint.save_profile("王五", np.ones(4, dtype=np.float32), seconds=1, chunks=1, model="old")
+        real_save = voiceprint.save_profile
+        in_save, release = threading.Event(), threading.Event()
+
+        def blocking_save(*a, **kw):
+            in_save.set()
+            release.wait(WAIT)
+            return real_save(*a, **kw)
+
+        svc = VoiceprintService(extractor=self.extractor)
+        self.addCleanup(svc.close)
+        self.addCleanup(release.set)
+        with mock.patch.object(voiceprint, "save_profile", blocking_save):
+            job = svc.start_import("王五", f, True)
+            self.assertTrue(in_save.wait(WAIT))
+            cancelled = svc.cancel(job)
+            release.set()
+            self.assertTrue(svc.join(WAIT))
+        st = svc.status(job)["state"]
+        replaced = voiceprint.list_profiles()[0]["model"] != "old"
+        self.assertFalse(st == "cancelled" and replaced)
+        self.assertEqual((cancelled, st, replaced), (False, "completed", True))
+
+
 class ShutdownTests(ServiceCase):
     def test_close_cancels_and_joins(self):
         before = set(mr_threads())

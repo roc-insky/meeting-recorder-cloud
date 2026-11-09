@@ -52,6 +52,7 @@ class VoiceprintService:
         self._threads: dict = {}
         self._stops: dict = {}
         self._active: Optional[str] = None
+        self._committed: set = set()          # 已越过“提交点”（开始落盘声纹）的任务 id
 
     # ---------- 互斥 ----------
     def set_exclusion(self, peer_busy: Callable[[], bool], lock) -> None:
@@ -135,10 +136,12 @@ class VoiceprintService:
             state = FAILED
             error = str(e) if isinstance(e, voiceprint.VoiceprintError) else f"登记失败（{e}）"
         with self._lock:
+            committed = job["id"] in self._committed
             if job["state"] != CANCELLED:        # 已取消的任务丢弃结果
-                if stop.is_set():
-                    state, error = CANCELLED, None
+                if stop.is_set() and not committed:
+                    state, error = CANCELLED, None   # 已越过提交点的任务以实际结果为准，不再改成“已取消”
                 job.update(state=state, error=error)
+            self._committed.discard(job["id"])
             self._active = None if self._active == job["id"] else self._active
 
     # ---------- 查询与取消 ----------
@@ -156,6 +159,8 @@ class VoiceprintService:
             if job is None:
                 raise JobNotFound("任务不存在")
             if job["state"] in _FINISHED:
+                return False
+            if job_id in self._committed:        # 已在落盘：不再取消（避免“已取消”却留下声纹）
                 return False
             job.update(state=CANCELLED, error=None)
             self._stops[job_id].set()
@@ -178,14 +183,29 @@ class VoiceprintService:
             self.cancel(active)
         return self.join(timeout)
 
+    # ---------- 提交点 ----------
+    def _commit(self, stop, save) -> None:
+        """提交点：与 cancel 在同一把锁内二选一。
+
+        锁内检查 stop 并登记“已提交”：此前取消 → 不保存、状态 cancelled；
+        此后取消 → cancel() 返回 False，任务按保存结果变为 completed/failed。
+        保存本身在锁外执行（不阻塞 cancel/status），也绝不回滚删除已替换的声纹。
+        """
+        with self._lock:
+            job_id = next((j for j, ev in self._stops.items() if ev is stop), None)
+            if stop.is_set():
+                raise voiceprint.VoiceprintError("已取消")
+            if job_id is not None:
+                self._committed.add(job_id)
+        save()
+
     # ---------- 默认的真实实现 ----------
     def _enroll_samples(self, name, samples, replace, stop) -> None:
         extractor = self._extractor or voiceprint.default_extractor()
         vector, chunks, speech_s = voiceprint.enroll_vector(samples, extractor=extractor)
-        if stop.is_set():
-            raise voiceprint.VoiceprintError("已取消")
-        voiceprint.save_profile(name, vector, seconds=speech_s, chunks=chunks,
-                                model=voiceprint.MODEL_NAME, replace=replace)
+        self._commit(stop, lambda: voiceprint.save_profile(
+            name, vector, seconds=speech_s, chunks=chunks,
+            model=voiceprint.MODEL_NAME, replace=replace))
 
     def _default_record_enroll(self, name, seconds, replace, *, stop, on_progress) -> None:
         samples = enroll.record_from_mic(
