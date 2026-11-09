@@ -2,6 +2,7 @@
 import io
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -469,15 +470,141 @@ class LiveTests(ControllerCase):
 
         ctl = self.make(live_factory=factory)
         ctl.start(live=True)
+        # 初始化在独立线程里异步进行：等降级提示出现后再停止，避免与停止竞争
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline and "warning" not in [e["type"] for e in self.drain(ctl)]:
+            time.sleep(0.01)
         ctl.stop()
         self.wait_final(ctl, "completed")
         types = [e["type"] for e in self.drain(ctl)]
         self.assertIn("warning", types)
+        self.assertFalse(ctl.snapshot()["live"])
 
     def test_live_without_factory_degrades(self):
         self.ctl.start(live=True)
         self.ctl.stop()
         self.wait_final(self.ctl, "completed")
+
+
+class SlowLiveInitTests(unittest.TestCase):
+    """实时转写初始化很慢（下载/加载 VAD）时，不得拖住录音写盘、停止与退出（真实 record.record + 假流）。"""
+
+    class Session:
+        def __init__(self):
+            self.fed = 0
+            self.finished = False
+
+        def feed(self, samples):
+            self.fed += 1
+
+        def finish(self):
+            self.finished = True
+
+    def setUp(self):
+        import common
+        from datetime import datetime
+        from tests.test_record import fake_factory, tone
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "Meetings"
+        self.gate = threading.Event()
+        self.addCleanup(self.gate.set)         # 无论测试成败都放行阻塞的工厂线程
+        self.entered = threading.Event()
+        self.session = self.Session()
+
+        def factory(meeting_dir, on_text):
+            self.entered.set()
+            self.gate.wait(WAIT * 4)
+            return self.session
+
+        self.factory = factory
+        self.rec_fn = meeting_controller.make_record_fn(
+            stream_factory=fake_factory([tone(1.0)]),
+            now=lambda: datetime(2026, 11, 9, 10, 30),
+            free_bytes_fn=lambda p: common.MIN_FREE_BYTES)
+
+    def make(self, **kw):
+        ctl = MeetingController(self.root, record_fn=self.rec_fn, transcribe_fn=lambda d, *, speakers: None,
+                                clock=FakeClock(), live_factory=self.factory, **kw)
+        self.addCleanup(ctl.close)
+        return ctl
+
+    def wav_samples(self, mid):
+        import common
+        try:
+            return common.read_wav_tolerant(self.root / mid / "meeting.wav")[1].size
+        except ValueError:
+            return 0
+
+    def wait_samples(self, mid, want):
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            if self.wav_samples(mid) >= want:
+                return True
+            time.sleep(0.01)
+        return False
+
+    def wait_final(self, ctl, want):
+        stop = threading.Event()
+        for ev in ctl.subscribe(None, stop, WAIT):
+            if ev is None or (ctl.snapshot()["final"] == want and ctl.snapshot()["state"] != "recording"):
+                break
+        return ctl.snapshot()["final"]
+
+    def test_blocked_init_does_not_stall_audio_or_stop(self):
+        ctl = self.make()
+        mid = ctl.start(live=True)
+        self.assertTrue(self.entered.wait(WAIT))
+        # 初始化仍卡着（gate 未放行），音频也必须照常写盘
+        self.assertTrue(self.wait_samples(mid, 16000), "实时初始化卡住时音频没有写盘")
+        self.assertFalse(self.gate.is_set())
+        t0 = time.monotonic()
+        ctl.stop()
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(self.wait_final(ctl, "completed"), "completed")
+        self.assertEqual(self.wav_samples(mid), 16000)          # 音频完整、wav 有效
+        self.assertEqual(ctl.snapshot()["state"], "idle")
+
+    def test_late_attached_live_is_dropped_after_recording_ended(self):
+        ctl = self.make()
+        mid = ctl.start(live=True)
+        self.assertTrue(self.entered.wait(WAIT))
+        ctl.stop()
+        self.assertEqual(self.wait_final(ctl, "completed"), "completed")
+        self.gate.set()                        # 录音结束后才初始化完成
+        deadline = time.monotonic() + WAIT
+        while not self.session.finished and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.session.finished)  # 被静默收掉
+        self.assertEqual(self.session.fed, 0)   # 没有喂过任何音频
+        self.assertEqual(self.wav_samples(mid), 16000)
+
+    def test_init_timeout_drops_live_but_keeps_recording(self):
+        ctl = self.make(live_init_timeout=0.05)
+        mid = ctl.start(live=True)
+        self.assertTrue(self.entered.wait(WAIT))
+        deadline = time.monotonic() + WAIT
+        while ctl.snapshot()["live"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(ctl.snapshot()["live"])
+        self.assertTrue(any(e["type"] == "warning" and "超时" in e["data"]["message"]
+                            for e in ctl.subscribe(0, threading.Event(), 0.01) if e))
+        self.assertEqual(ctl.snapshot()["state"], "recording")   # 录音继续
+        self.gate.set()                       # 超时之后才完成的会话不得再挂接
+        time.sleep(0.1)
+        ctl.stop()
+        self.assertEqual(self.wait_final(ctl, "completed"), "completed")
+        self.assertEqual(self.session.fed, 0)
+        self.assertEqual(self.wav_samples(mid), 16000)
+
+    def test_close_returns_promptly_with_blocked_init(self):
+        ctl = self.make()
+        ctl.start(live=True)
+        self.assertTrue(self.entered.wait(WAIT))
+        t0 = time.monotonic()
+        ctl.close(timeout=3.0)
+        self.assertLess(time.monotonic() - t0, 3.5)
+        self.assertEqual(ctl.snapshot()["state"], "idle")
 
 
 class VoiceprintCoordinationTests(ControllerCase):

@@ -41,6 +41,8 @@ SPEAKERS_MAX = 20
 HISTORY_MAX = 2000
 START_TIMEOUT_S = 30.0       # start() 最多等多久拿到会议目录（打开麦克风自身有 15 秒超时）
 JOIN_TIMEOUT_S = 15.0        # close() 默认等线程收尾的时间
+LIVE_INIT_TIMEOUT_S = 60.0   # 实时转写初始化（下载/加载 VAD）最多等多久，超时就放弃实时转写，只保证录音完整
+LIVE_INIT_JOIN_S = 2.0       # close() 等初始化线程收尾的上限（它是守护线程，卡住也不会拖住退出）
 _WAIT_SLICE_S = 0.25         # 订阅者每次最长睡多久就检查一次取消
 
 
@@ -74,7 +76,8 @@ def _validate_speakers(speakers) -> Optional[int]:
 class MeetingController:
     def __init__(self, root, *, record_fn, transcribe_fn, clock=time.monotonic,
                  live_factory=None, history_max: int = HISTORY_MAX,
-                 start_timeout: float = START_TIMEOUT_S):
+                 start_timeout: float = START_TIMEOUT_S,
+                 live_init_timeout: float = LIVE_INIT_TIMEOUT_S):
         self._root = Path(root)
         self._record_fn = record_fn
         self._transcribe_fn = transcribe_fn
@@ -82,6 +85,7 @@ class MeetingController:
         self._live_factory = live_factory
         self._history_max = max(1, int(history_max))
         self._start_timeout = start_timeout
+        self._live_init_timeout = live_init_timeout
         self._cond = threading.Condition(threading.RLock())
         self._coord = threading.RLock()       # 与声纹服务共用时被 set_exclusion 替换
         self._peer_busy: Callable[[], bool] = lambda: False
@@ -100,6 +104,8 @@ class MeetingController:
         self._live_on = False
         self._live_session = None
         self._live_warned = False
+        self._live_gen = 0                    # 每场录音/收尾加一；初始化线程用它判断自己是否已过期
+        self._live_init_thread: Optional[threading.Thread] = None
         self._stop_evt: Optional[threading.Event] = None
         self._record_thread: Optional[threading.Thread] = None
         self._transcribe_thread: Optional[threading.Thread] = None
@@ -246,6 +252,8 @@ class MeetingController:
                 self._live_on = bool(live)
                 self._live_session = None
                 self._live_warned = False
+                self._live_gen += 1
+                self._live_init_thread = None
                 stop_evt = threading.Event()
                 self._stop_evt = stop_evt
                 started_evt = threading.Event()
@@ -281,9 +289,11 @@ class MeetingController:
             with self._cond:
                 self._meeting_id = meeting_dir.name
                 self._emit_state_locked()
-            started_evt.set()          # 先放行 start()，再做可能慢的实时转写初始化
+            started_evt.set()          # 先放行 start()
             if live:
-                self._start_live(meeting_dir)
+                # 实时转写初始化可能很慢（下载/加载 VAD 模型），绝不能占用录音线程：
+                # 录音线程必须马上去消费音频队列，所以放到独立线程里，好了再挂接
+                self._spawn_live_init(meeting_dir)
         return on_started
 
     def _warn_once_locked(self, message: str) -> None:
@@ -291,21 +301,59 @@ class MeetingController:
             self._live_warned = True
             self._emit_locked("warning", {"message": message})
 
-    def _start_live(self, meeting_dir: Path) -> None:
-        if self._live_factory is None:
-            with self._cond:
-                self._live_on = False
-                self._warn_once_locked("实时转写不可用，将只录音")
-            return
-        try:
-            session = self._live_factory(meeting_dir, self._on_live_text)
-        except Exception as e:  # noqa: BLE001 实时转写失败不影响录音
-            with self._cond:
-                self._live_on = False
-                self._warn_once_locked(f"实时转写启动失败，继续录音（{e}）")
-            return
+    def _spawn_live_init(self, meeting_dir: Path) -> None:
         with self._cond:
-            self._live_session = session
+            gen = self._live_gen
+            token = {"expired": False, "done": False}
+            t = threading.Thread(target=self._live_init_main, args=(meeting_dir, gen, token),
+                                 name="mr-live-init", daemon=True)
+            self._live_init_thread = t
+            # 看门狗：初始化卡住（例如下载不动）时到点就放弃实时转写，录音与停止都不受影响
+            timer = threading.Timer(self._live_init_timeout, self._live_init_expire, args=(gen, token))
+            timer.daemon = True
+            token["timer"] = timer
+        t.start()
+        timer.start()
+
+    def _live_init_expire(self, gen: int, token: dict) -> None:
+        with self._cond:
+            if token["done"] or token["expired"]:
+                return
+            token["expired"] = True
+            if gen == self._live_gen and self._recording:
+                self._live_on = False
+                self._warn_once_locked("实时转写初始化超时，已放弃，继续录音")
+
+    def _live_init_main(self, meeting_dir: Path, gen: int, token: dict) -> None:
+        """独立线程里创建实时转写会话；录音已结束或初始化超时则静默丢弃（音频不受影响）。"""
+        session = None
+        error = None
+        if self._live_factory is None:
+            error = "实时转写不可用，将只录音"
+        else:
+            try:
+                session = self._live_factory(meeting_dir, self._on_live_text)
+            except Exception as e:  # noqa: BLE001 实时转写失败不影响录音
+                error = f"实时转写启动失败，继续录音（{e}）"
+        with self._cond:
+            token["done"] = True
+            token["timer"].cancel()
+            current = (gen == self._live_gen and self._recording and not self._stopping
+                       and not self._closed and not token["expired"])
+            if error is not None:
+                # 失败提示只要这场录音还没结束就给（即使用户已按停止）
+                if gen == self._live_gen and self._recording and not token["expired"]:
+                    self._live_on = False
+                    self._warn_once_locked(error)
+                return
+            if current:
+                self._live_session = session
+                return
+        # 过期的会话（录音已结束/已超时）：静默收掉它的后台线程，不挂接、不喂音频
+        try:
+            session.finish()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_live_text(self, start_s: float, text: str) -> None:
         self._emit("live_text", {"t": start_s, "text": text})
@@ -336,7 +384,9 @@ class MeetingController:
                     on_level=self._on_level, on_samples=self._on_samples)
             except Exception as e:  # noqa: BLE001 线程里不能让异常逃出去
                 error = str(e) if isinstance(e, record.RecorderError) else f"录音失败（{e}）"
-            session = self._live_session
+            with self._cond:
+                self._live_gen += 1         # 让还没完成的初始化线程知道录音已结束，不得再挂接
+                session = self._live_session
             if session is not None:
                 try:
                     session.finish()
@@ -414,6 +464,10 @@ class MeetingController:
         # 录音线程收尾时才会创建转写线程，所以录音线程结束后再取一次
         with self._cond:
             t2 = self._transcribe_thread
+            t3 = self._live_init_thread
+        if t3 is not None and t3 is not threading.current_thread():
+            # 实时初始化线程是守护线程且已被作废；只做有上限的等待，卡住也不影响退出
+            t3.join(min(LIVE_INIT_JOIN_S, max(0.0, deadline - time.monotonic())))
         if t2 is not None and t2 not in threads:
             t2.join(max(0.0, deadline - time.monotonic()))
             ok = ok and not t2.is_alive()
