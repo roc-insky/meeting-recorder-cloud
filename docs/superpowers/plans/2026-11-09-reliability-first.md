@@ -300,6 +300,11 @@
 - Task 10：`tools/eval_voiceprint.py` 与文档已实现。
 - Task 11：阻塞——需要真实标注会议数据，当前没有。
 - Task 12：本文档与 README、总计划已登记。
+- 独立审查（review15-fast）发现 2 个 MUST-FIX，已修并提交 202e187「fix: 重新转写失败还原旧稿，网页转写读取声纹阈值」：
+  - 网页录音转写现在真的读 `config.toml` 的 `[voiceprint]`（此前只有命令行读）；
+  - `force` 重新转写失败时把旧稿从 `.bak` 换回 `transcript.md`；
+  - 别的会议正在后台转写时不再并发补转写（避免重复加载模型）。
+  最终 `.venv/bin/python -m unittest discover -s tests -t .` → 591 条全绿。
 
-验证：`.venv/bin/python -m unittest discover -s tests -t .` → 587 条全绿；`node --check web/static/app.js` 通过。
+验证：`.venv/bin/python -m unittest discover -s tests -t .` → 591 条全绿；`node --check web/static/app.js` 通过。
 未测：真实麦克风录音、模型下载、真实大模型调用、真实声纹登记、浏览器端到端。
