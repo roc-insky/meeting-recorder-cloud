@@ -126,7 +126,7 @@ class EnrollMainTest(unittest.TestCase):
         self.assertFalse(self.profiles.exists())
 
     def test_enroll_conflict_needs_replace_and_skips_extractor(self):
-        voiceprint.save_profile("张三", np.ones(512), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.ones(512), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         wav = self.root / "a.wav"
         write_wav(wav, speech(12.0))
 

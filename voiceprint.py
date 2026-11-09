@@ -21,6 +21,7 @@ PROFILE_DIR = Path.home() / ".config/meeting-recorder/voiceprints"
 DEFAULT_THRESHOLD = 0.5  # 未校准
 MODEL_NAME = diarize.EMBEDDING_FILE
 PROFILE_VERSION = 1
+EMBEDDING_DIM = 512         # 生产模型（MODEL_NAME）输出的声纹维度；识别载入时校验，保存等通用函数不限定维度
 NAME_MAX_LEN = 20
 RESERVED_PREFIX = "说话人"
 MAX_CLUSTER_SECONDS = 60.0  # 每个聚类最多取这么长的音频算向量
@@ -142,26 +143,63 @@ def _read_profile(path: Path) -> dict:
     return data
 
 
-def _iter_profiles(stderr=None):
-    """按文件名顺序产出读成功的声纹字典；坏文件警告后跳过。"""
+def _incompatibility(profile: dict) -> str | None:
+    """声纹与当前生产模型是否可比：不可比返回原因，可比返回 None。
+
+    不同模型（或不同维度）的向量不在同一空间，余弦分没有意义；
+    旧文件没有 model 字段也无法确认同源，一并按不可比处理。
+    """
+    model = profile.get("model")
+    if model != MODEL_NAME:
+        if not model:
+            return "旧版声纹缺少模型信息"
+        return f"登记所用模型“{model}”与当前模型“{MODEL_NAME}”不一致"
+    dim = len(profile["vector"])
+    if dim != EMBEDDING_DIM:
+        return f"向量维度 {dim} 与当前模型的 {EMBEDDING_DIM} 不符"
+    return None
+
+
+def _iter_profiles(stderr=None, *, matching: bool = False):
+    """按文件名顺序产出读成功的声纹字典；坏文件警告后跳过。
+
+    matching=True 时额外跳过与当前模型不兼容的声纹并告警：
+    它们参与比对只会静默得 0 分（或维度不符直接报错），不如明确提示重新登记。
+    """
     if not PROFILE_DIR.is_dir():
         return
     for path in sorted(PROFILE_DIR.glob("*.json")):
         try:
-            yield _read_profile(path)
+            profile = _read_profile(path)
         except (OSError, ValueError) as e:  # JSON 解析错误也是 ValueError
             print(f"警告：声纹文件损坏，已跳过：{path.name}（{e}）", file=stderr or sys.stderr)
+            continue
+        if matching:
+            reason = _incompatibility(profile)
+            if reason:
+                print(
+                    f"警告：声纹与当前模型不兼容，已跳过：{path.name}（{reason}，请重新登记）",
+                    file=stderr or sys.stderr,
+                )
+                continue
+        yield profile
 
 
 def load_profiles(*, stderr=None) -> dict:
-    """读取全部声纹，返回 {名字: 单位向量}；坏文件跳过并警告。目录不存在返回空字典。"""
-    return {p["name"]: p["vector"] for p in _iter_profiles(stderr)}
+    """读取可用于识别的声纹，返回 {名字: 单位向量}。
+
+    坏文件、与当前模型不兼容的文件都会警告后跳过；目录不存在返回空字典。
+    """
+    return {p["name"]: p["vector"] for p in _iter_profiles(stderr, matching=True)}
 
 
 def list_profiles(*, stderr=None) -> list:
-    """声纹摘要列表（不含向量）。"""
+    """声纹摘要列表（不含向量）；compatible 表示该声纹能否用于当前模型。"""
     keys = ("name", "model", "created", "seconds", "chunks")
-    return [{k: p.get(k) for k in keys} for p in _iter_profiles(stderr)]
+    return [
+        {**{k: p.get(k) for k in keys}, "compatible": _incompatibility(p) is None}
+        for p in _iter_profiles(stderr)
+    ]
 
 
 def delete_profile(name) -> bool:

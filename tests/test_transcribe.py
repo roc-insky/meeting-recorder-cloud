@@ -326,7 +326,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertFalse(self.profiles.exists())  # 不创建声纹目录
 
     def test_voiceprint_renames_cluster(self):
-        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         err = io.StringIO()
         out = transcribe.transcribe_wav(
             self.wav, model="m", deps=self.deps(stderr=err, extractor=lambda x: np.eye(512)[0])
@@ -336,7 +336,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
 
     def test_no_voiceprint_flag_skips(self):
-        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
 
         def boom(x):
             raise AssertionError("--no-voiceprint 不应提取")
@@ -347,7 +347,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertIn("说话人B: 你好", text)
 
     def test_voice_threshold_option(self):
-        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         ext = lambda x: np.eye(512)[1]  # 与声纹正交，分数 0
         code = transcribe.main([str(self.wav), "--voice-threshold", "0.5"], deps=self.deps(extractor=ext))
         self.assertEqual(code, 0)
@@ -357,7 +357,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertIn("张三: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
 
     def test_voiceprint_failure_keeps_diarize_labels(self):
-        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
 
         def boom(x):
             raise RuntimeError("模型坏了")
@@ -369,7 +369,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertNotIn("区分失败", err.getvalue())
 
     def test_default_extractor_failure_keeps_diarize_labels(self):
-        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
 
         def no_model():
             raise OSError("无网络")
@@ -389,7 +389,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertIn("坏.json", err.getvalue())
 
     def test_diarize_failure_skips_voiceprint(self):
-        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
 
         def boom(s, r, n):
             raise RuntimeError("坏了")

@@ -59,14 +59,14 @@ class ValidateNameTest(unittest.TestCase):
 class ProfileStoreTest(TmpProfileDirTest):
     def test_save_load_roundtrip_perm_600(self):
         vec = np.random.default_rng(0).normal(size=DIM)
-        path = voiceprint.save_profile("张三", vec, seconds=31.2, chunks=10, model="m.onnx")
+        path = voiceprint.save_profile("张三", vec, seconds=31.2, chunks=10, model=voiceprint.MODEL_NAME)
         self.assertEqual(path, self.dir / "张三.json")
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         data = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(
             set(data), {"version", "name", "model", "created", "seconds", "chunks", "vector"}
         )
-        self.assertEqual((data["version"], data["name"], data["model"], data["chunks"]), (1, "张三", "m.onnx", 10))
+        self.assertEqual((data["version"], data["name"], data["model"], data["chunks"]), (1, "张三", voiceprint.MODEL_NAME, 10))
         self.assertEqual(len(data["vector"]), DIM)
         self.assertAlmostEqual(float(np.linalg.norm(data["vector"])), 1.0, places=6)
         loaded = voiceprint.load_profiles()
@@ -76,37 +76,37 @@ class ProfileStoreTest(TmpProfileDirTest):
     def test_perm_600_even_with_permissive_umask(self):
         old = os.umask(0)
         self.addCleanup(os.umask, old)
-        path = voiceprint.save_profile("a", unit_vec(0), seconds=1, chunks=1, model="m")
+        path = voiceprint.save_profile("a", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_save_conflict_without_replace(self):
-        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         with self.assertRaises(voiceprint.VoiceprintError) as cm:
-            voiceprint.save_profile("张三", unit_vec(1), seconds=1, chunks=1, model="m")
+            voiceprint.save_profile("张三", unit_vec(1), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         self.assertIn("已存在", str(cm.exception))
         np.testing.assert_allclose(voiceprint.load_profiles()["张三"], unit_vec(0))
-        voiceprint.save_profile("张三", unit_vec(1), seconds=1, chunks=1, model="m", replace=True)
+        voiceprint.save_profile("张三", unit_vec(1), seconds=1, chunks=1, model=voiceprint.MODEL_NAME, replace=True)
         np.testing.assert_allclose(voiceprint.load_profiles()["张三"], unit_vec(1))
 
     def test_save_atomic(self):
-        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         with mock.patch("os.replace", side_effect=OSError("磁盘错误")):
             with self.assertRaises(OSError):
-                voiceprint.save_profile("张三", unit_vec(1), seconds=1, chunks=1, model="m", replace=True)
+                voiceprint.save_profile("张三", unit_vec(1), seconds=1, chunks=1, model=voiceprint.MODEL_NAME, replace=True)
         np.testing.assert_allclose(voiceprint.load_profiles()["张三"], unit_vec(0))
         self.assertEqual([p.name for p in self.dir.iterdir()], ["张三.json"])  # 无残留临时文件
 
     def test_save_rejects_bad_name_and_zero_vector(self):
         with self.assertRaises(voiceprint.VoiceprintError):
-            voiceprint.save_profile("../x", unit_vec(0), seconds=1, chunks=1, model="m")
+            voiceprint.save_profile("../x", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         with self.assertRaises(voiceprint.VoiceprintError):
-            voiceprint.save_profile("a", np.zeros(DIM), seconds=1, chunks=1, model="m")
+            voiceprint.save_profile("a", np.zeros(DIM), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         self.assertFalse(self.dir.exists() and any(self.dir.iterdir()))
 
     def test_case_only_replace_keeps_one_loadable_profile(self):
         """Bob → bob（replace）：不论文件系统是否区分大小写，只剩 bob.json，里面的名字与文件名一致。"""
-        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
-        voiceprint.save_profile("bob", unit_vec(1), seconds=2, chunks=2, model="m", replace=True)
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
+        voiceprint.save_profile("bob", unit_vec(1), seconds=2, chunks=2, model=voiceprint.MODEL_NAME, replace=True)
         self.assertEqual(sorted(os.listdir(self.dir)), ["bob.json"])
         err = io.StringIO()
         loaded = voiceprint.load_profiles(stderr=err)
@@ -117,16 +117,16 @@ class ProfileStoreTest(TmpProfileDirTest):
         self.assertEqual(data["name"], Path(os.listdir(self.dir)[0]).stem)
 
     def test_case_only_conflict_without_replace(self):
-        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         with self.assertRaises(voiceprint.VoiceprintError):
-            voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model="m")
+            voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         self.assertEqual(sorted(os.listdir(self.dir)), ["Bob.json"])
         self.assertEqual(list(voiceprint.load_profiles()), ["Bob"])
         self.assertEqual(voiceprint.existing_profile_path("bOB").name, "Bob.json")
 
     def test_case_only_replace_on_simulated_case_insensitive_fs(self):
         """模拟不区分大小写的 os.replace：目标目录里已有同名不同拼写的文件时，写进那个旧拼写的文件。"""
-        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         real_replace = os.replace
 
         def ci_replace(src, dst):
@@ -138,15 +138,15 @@ class ProfileStoreTest(TmpProfileDirTest):
             return real_replace(src, dst)
 
         with mock.patch("voiceprint.os.replace", ci_replace), mock.patch("common.os.replace", ci_replace):
-            voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model="m", replace=True)
+            voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model=voiceprint.MODEL_NAME, replace=True)
         self.assertEqual(sorted(os.listdir(self.dir)), ["bob.json"])
         self.assertEqual(list(voiceprint.load_profiles()), ["bob"])
 
     def test_case_only_replace_failure_restores_old_file(self):
-        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         with mock.patch("common.atomic_write_text", side_effect=OSError("磁盘满")):
             with self.assertRaises(OSError):
-                voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model="m", replace=True)
+                voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model=voiceprint.MODEL_NAME, replace=True)
         self.assertEqual(sorted(os.listdir(self.dir)), ["Bob.json"])
         np.testing.assert_allclose(voiceprint.load_profiles()["Bob"], unit_vec(0))
 
@@ -155,7 +155,7 @@ class ProfileStoreTest(TmpProfileDirTest):
         self.assertEqual(voiceprint.list_profiles(), [])
 
     def test_load_skips_bad_files_with_warning(self):
-        voiceprint.save_profile("好", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("好", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         (self.dir / "坏.json").write_text("{不是json", encoding="utf-8")
         (self.dir / "空向量.json").write_text(
             json.dumps({"version": 1, "name": "空向量", "vector": []}), encoding="utf-8"
@@ -170,18 +170,64 @@ class ProfileStoreTest(TmpProfileDirTest):
             self.assertIn(name, err.getvalue())
 
     def test_list_profiles_has_no_vector(self):
-        voiceprint.save_profile("张三", unit_vec(0), seconds=12.5, chunks=4, model="m")
+        voiceprint.save_profile("张三", unit_vec(0), seconds=12.5, chunks=4, model=voiceprint.MODEL_NAME)
         rows = voiceprint.list_profiles()
         self.assertEqual(len(rows), 1)
         self.assertNotIn("vector", rows[0])
         self.assertEqual((rows[0]["name"], rows[0]["chunks"], rows[0]["seconds"]), ("张三", 4, 12.5))
 
     def test_delete_profile(self):
-        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         self.assertTrue(voiceprint.delete_profile("张三"))
         self.assertFalse(voiceprint.delete_profile("张三"))
         self.assertFalse(voiceprint.delete_profile("../x"))
         self.assertEqual(voiceprint.load_profiles(), {})
+
+
+class CompatibilityTest(TmpProfileDirTest):
+    """模型/维度不同的声纹不可比：匹配载入时告警跳过，列表仍展示并标记 compatible。"""
+
+    def write_profile(self, name, *, model, dim, with_model=True):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "version": 1, "name": name, "created": "2026-01-01T00:00:00",
+            "seconds": 1.0, "chunks": 1, "vector": [1.0] + [0.0] * (dim - 1),
+        }
+        if with_model:
+            data["model"] = model
+        (self.dir / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def test_load_skips_other_model_with_warning(self):
+        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
+        self.write_profile("旧模型", model="old.onnx", dim=512)
+        err = io.StringIO()
+        self.assertEqual(list(voiceprint.load_profiles(stderr=err)), ["张三"])
+        self.assertIn("不兼容", err.getvalue())
+        self.assertIn("旧模型", err.getvalue())
+        self.assertIn("old.onnx", err.getvalue())
+
+    def test_load_skips_wrong_dim_with_warning(self):
+        self.write_profile("小明", model=voiceprint.MODEL_NAME, dim=4)
+        err = io.StringIO()
+        self.assertEqual(voiceprint.load_profiles(stderr=err), {})
+        self.assertIn("维度", err.getvalue())
+        self.assertIn("小明", err.getvalue())
+
+    def test_load_skips_legacy_profile_without_model(self):
+        self.write_profile("旧版", model=None, dim=512, with_model=False)
+        err = io.StringIO()
+        self.assertEqual(voiceprint.load_profiles(stderr=err), {})
+        self.assertIn("旧版", err.getvalue())
+        self.assertIn("模型", err.getvalue())
+
+    def test_list_marks_compatibility_and_keeps_incompatible(self):
+        voiceprint.save_profile("张三", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
+        self.write_profile("旧模型", model="old.onnx", dim=512)
+        rows = {r["name"]: r for r in voiceprint.list_profiles(stderr=io.StringIO())}
+        self.assertEqual(set(rows), {"张三", "旧模型"})
+        self.assertTrue(rows["张三"]["compatible"])
+        self.assertFalse(rows["旧模型"]["compatible"])
+        self.assertNotIn("vector", rows["旧模型"])
 
 
 class EmbedTest(unittest.TestCase):
