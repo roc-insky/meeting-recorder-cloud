@@ -9,8 +9,10 @@ import math
 import os
 import re
 import sys
+import tomllib
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -18,12 +20,16 @@ import common
 import diarize
 
 PROFILE_DIR = Path.home() / ".config/meeting-recorder/voiceprints"
-DEFAULT_THRESHOLD = 0.5  # 未校准
+DEFAULT_HIGH = 0.5   # 未校准：达到即写真名
+DEFAULT_LOW = 0.35   # 未校准：达到即写“疑似X”
+DEFAULT_THRESHOLD = DEFAULT_HIGH  # 旧接口的别名，等价于高阈值
+SUSPECT_PREFIX = "疑似"
 MODEL_NAME = diarize.EMBEDDING_FILE
 PROFILE_VERSION = 1
 EMBEDDING_DIM = 512         # 生产模型（MODEL_NAME）输出的声纹维度；识别载入时校验，保存等通用函数不限定维度
 NAME_MAX_LEN = 20
 RESERVED_PREFIX = "说话人"
+_THRESHOLD_RULE = "0 < low < high ≤ 1"
 MAX_CLUSTER_SECONDS = 60.0  # 每个聚类最多取这么长的音频算向量
 MIN_CLUSTER_SECONDS = 1.0   # 聚类音频不足这么长就不参与识别
 FRAME_S = 0.1               # 去静音时的分帧长度
@@ -36,8 +42,56 @@ class VoiceprintError(ValueError):
     """声纹相关的可预期错误，消息可直接展示给用户。"""
 
 
+class Thresholds(NamedTuple):
+    """声纹相似度的两个阈值；warning 非空表示配置有问题、已退回默认值。"""
+
+    high: float
+    low: float
+    warning: str | None = None
+
+
+def _voiceprint_section(config_path) -> dict:
+    """读取 config.toml 的 [voiceprint] 表；文件缺失、不可读、语法错或不是表都返回空字典。"""
+    if config_path is None:
+        return {}
+    try:
+        with open(Path(config_path), "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError):  # TOMLDecodeError 与 UnicodeDecodeError 都是 ValueError
+        return {}
+    section = data.get("voiceprint")
+    return section if isinstance(section, dict) else {}
+
+
+def _finite_number(value):
+    """是有限数字（int/float 且不是 bool）就返回 float，否则返回 None。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def load_thresholds(config_path: Path | None, cli_high: float | None = None) -> Thresholds:
+    """读取 [voiceprint] 的 high/low；缺省用默认值，非法时退回默认值并给中文 warning。
+
+    cli_high 只覆盖 high；先应用它，再校验 0 < low < high <= 1。
+    """
+    section = _voiceprint_section(config_path)
+    high = _finite_number(section.get("high", DEFAULT_HIGH))
+    low = _finite_number(section.get("low", DEFAULT_LOW))
+    if cli_high is not None:
+        high = _finite_number(cli_high)
+    if high is None or low is None or not (0 < low < high <= 1):
+        return Thresholds(
+            DEFAULT_HIGH,
+            DEFAULT_LOW,
+            f"声纹阈值无效（需满足 {_THRESHOLD_RULE}），已改用默认值 high={DEFAULT_HIGH}、low={DEFAULT_LOW}",
+        )
+    return Thresholds(high, low, None)
+
+
 def validate_name(name: str) -> str:
-    """校验声纹名字：字母/数字/中日韩文字/下划线/连字符，1–20 字，不能以“说话人”开头。返回原名字。"""
+    """校验声纹名字：字母/数字/中日韩文字/下划线/连字符，1–20 字，不能以“说话人”或“疑似”开头。返回原名字。"""
     if not isinstance(name, str) or not name:
         raise VoiceprintError("名字不能为空")
     if len(name) > NAME_MAX_LEN:
@@ -46,7 +100,30 @@ def validate_name(name: str) -> str:
         raise VoiceprintError("名字只能含字母、数字、文字、下划线和连字符")
     if name.startswith(RESERVED_PREFIX):
         raise VoiceprintError(f"名字不能以“{RESERVED_PREFIX}”开头")
+    if name.startswith(SUSPECT_PREFIX):
+        raise VoiceprintError(f"名字不能以“{SUSPECT_PREFIX}”开头")
     return name
+
+
+def suspect_label(name: str) -> str:
+    """给名字加上“疑似”前缀（不检查是否已带前缀）。"""
+    return SUSPECT_PREFIX + name
+
+
+def parse_label(label: str) -> tuple[str, bool]:
+    """拆出显示名与是否为灰区标签；只剥一层“疑似”前缀。"""
+    if label.startswith(SUSPECT_PREFIX):
+        return label[len(SUSPECT_PREFIX):], True
+    return label, False
+
+
+def classify_score(score: float, th: Thresholds) -> str:
+    """按阈值把相似度分档：named（≥ high）、suspect（≥ low）、anonymous。"""
+    if score >= th.high:
+        return "named"
+    if score >= th.low:
+        return "suspect"
+    return "anonymous"
 
 
 def profile_path(name: str) -> Path:

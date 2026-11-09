@@ -56,6 +56,97 @@ class ValidateNameTest(unittest.TestCase):
         self.assertEqual(voiceprint.DEFAULT_THRESHOLD, 0.5)
 
 
+class SuspectNameTest(TmpProfileDirTest):
+    def test_register_rejects_suspect_prefix(self):
+        """“疑似”是灰区标签前缀，不能用于登记名字。"""
+        for name in ("疑似张三", "疑似"):
+            with self.assertRaises(voiceprint.VoiceprintError, msg=name):
+                voiceprint.validate_name(name)
+        with self.assertRaises(voiceprint.VoiceprintError):
+            voiceprint.save_profile("疑似张三", unit_vec(0), seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
+        self.assertFalse(self.dir.exists() and any(self.dir.iterdir()))
+
+
+class SuspectLabelTest(unittest.TestCase):
+    def test_parse_label(self):
+        cases = {
+            "疑似张三": ("张三", True),
+            "张三": ("张三", False),
+            "说话人A": ("说话人A", False),
+            "疑似疑似张三": ("疑似张三", True),  # 只剥一层前缀
+        }
+        for label, want in cases.items():
+            self.assertEqual(voiceprint.parse_label(label), want, msg=label)
+
+    def test_suspect_label(self):
+        self.assertEqual(voiceprint.SUSPECT_PREFIX, "疑似")
+        self.assertEqual(voiceprint.suspect_label("张三"), "疑似张三")
+        self.assertEqual(voiceprint.parse_label(voiceprint.suspect_label("张三")), ("张三", True))
+
+
+class ThresholdsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def write_config(self, text):
+        path = self.dir / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_default_thresholds(self):
+        self.assertEqual(voiceprint.DEFAULT_HIGH, 0.5)
+        self.assertEqual(voiceprint.DEFAULT_LOW, 0.35)
+        self.assertEqual(voiceprint.DEFAULT_THRESHOLD, voiceprint.DEFAULT_HIGH)
+        self.assertEqual(voiceprint.Thresholds(0.5, 0.35), voiceprint.Thresholds(0.5, 0.35, None))
+
+    def test_thresholds_default(self):
+        """文件不存在、无 [voiceprint] 段：静默使用默认值。"""
+        self.assertEqual(voiceprint.load_thresholds(None), (0.5, 0.35, None))
+        self.assertEqual(voiceprint.load_thresholds(self.dir / "不存在.toml"), (0.5, 0.35, None))
+        path = self.write_config("[web]\nport = 8765\n")
+        self.assertEqual(voiceprint.load_thresholds(path), (0.5, 0.35, None))
+
+    def test_thresholds_valid(self):
+        path = self.write_config("[voiceprint]\nhigh = 0.6\nlow = 0.4\n")
+        self.assertEqual(voiceprint.load_thresholds(path), (0.6, 0.4, None))
+
+    def test_thresholds_invalid(self):
+        """low>=high、low 越界、字符串、布尔：一律退回默认值并给中文 warning。"""
+        cases = [
+            "[voiceprint]\nhigh = 0.4\nlow = 0.4\n",
+            "[voiceprint]\nhigh = 0.6\nlow = -0.1\n",
+            '[voiceprint]\nhigh = "abc"\nlow = 0.4\n',
+            "[voiceprint]\nhigh = true\nlow = 0.4\n",
+        ]
+        for text in cases:
+            th = voiceprint.load_thresholds(self.write_config(text))
+            self.assertEqual((th.high, th.low), (0.5, 0.35), msg=text)
+            self.assertTrue(th.warning, msg=text)
+            self.assertRegex(th.warning, r"[\u4e00-\u9fff]", msg=text)
+
+    def test_cli_high_overrides_high_only(self):
+        path = self.write_config("[voiceprint]\nlow = 0.4\n")
+        self.assertEqual(voiceprint.load_thresholds(path, cli_high=0.7), (0.7, 0.4, None))
+        th = voiceprint.load_thresholds(path, cli_high=0.3)
+        self.assertEqual((th.high, th.low), (0.5, 0.35))
+        self.assertTrue(th.warning)
+        self.assertEqual(voiceprint.load_thresholds(None, cli_high=0.7), (0.7, 0.35, None))
+        # 先应用 cli_high 再校验：配置里的 high 坏了，但 cli_high 合法，仍可用
+        bad = self.write_config('[voiceprint]\nhigh = "abc"\nlow = 0.4\n')
+        self.assertEqual(voiceprint.load_thresholds(bad, cli_high=0.7), (0.7, 0.4, None))
+
+    def test_classify_boundaries(self):
+        th = voiceprint.Thresholds(0.6, 0.4)
+        self.assertEqual(voiceprint.classify_score(1.0, th), "named")
+        self.assertEqual(voiceprint.classify_score(0.6, th), "named")
+        self.assertEqual(voiceprint.classify_score(0.5999, th), "suspect")
+        self.assertEqual(voiceprint.classify_score(0.4, th), "suspect")
+        self.assertEqual(voiceprint.classify_score(0.3999, th), "anonymous")
+        self.assertEqual(voiceprint.classify_score(0.0, th), "anonymous")
+
+
 class ProfileStoreTest(TmpProfileDirTest):
     def test_save_load_roundtrip_perm_600(self):
         vec = np.random.default_rng(0).normal(size=DIM)
