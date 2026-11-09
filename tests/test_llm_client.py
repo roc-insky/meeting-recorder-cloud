@@ -162,6 +162,122 @@ class ChatTests(unittest.TestCase):
             llm_client.chat_summary(CFG, "s", "u", opener=op)
 
 
+class TestConnectionTests(unittest.TestCase):
+    """test_connection：只返回固定的中文原因，不发第二次请求，不回传服务器原文或 Key。"""
+
+    OK = "连接成功"
+    NOT_CONFIGURED = "未配置大模型"
+    CONNECT = "无法连接，请检查地址和网络"
+    AUTH = "认证失败，请检查 API Key"
+    SERVER = "服务返回错误"
+    TIMEOUT = "请求超时"
+    REDIRECT = "地址发生了重定向，已拒绝"
+
+    def test_ok(self):
+        op = FakeOpener(FakeResp(ok_body("好")))
+        self.assertEqual(llm_client.test_connection(CFG, opener=op), (True, self.OK))
+        self.assertEqual(len(op.requests), 1)
+        req = op.requests[0]
+        self.assertEqual(req.full_url, "https://llm.example.com/v1/chat/completions")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.get_header("Authorization"), "Bearer sk-secret-123")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        self.assertEqual(op.timeouts, [7])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["model"], "m-1")
+        self.assertEqual(body["max_tokens"], 1)
+        self.assertEqual(len(body["messages"]), 1)
+        self.assertEqual(body["messages"][0]["role"], "user")
+        self.assertIs(body.get("stream", False), False)
+
+    def test_not_configured(self):
+        for cfg in (None, {}, {"base_url": "https://llm.example.com/v1/", "api_key": ""},
+                    {"base_url": "https://llm.example.com/v1/", "api_key": "sk-secret-123"}):
+            with self.subTest(cfg=cfg):
+                op = FakeOpener()
+                self.assertEqual(llm_client.test_connection(cfg, opener=op),
+                                 (False, self.NOT_CONFIGURED))
+                self.assertEqual(op.requests, [])
+
+    def test_auth_failed(self):
+        for code in (401, 403):
+            with self.subTest(code=code):
+                op = FakeOpener(http_error(code, b"bad key sk-secret-123"))
+                result = llm_client.test_connection(CFG, opener=op)
+                self.assertEqual(result, (False, self.AUTH))
+                self.assertNotIn("sk-secret-123", repr(result))
+
+    def test_server_error_body_has_key(self):
+        op = FakeOpener(http_error(500, b"bad key sk-secret-123"))
+        result = llm_client.test_connection(CFG, opener=op)
+        self.assertEqual(result, (False, self.SERVER))
+        self.assertNotIn("sk-secret-123", repr(result))
+
+    def test_server_error_statuses(self):
+        for code in (400, 404, 429, 500, 502, 503):
+            with self.subTest(code=code):
+                result = llm_client.test_connection(CFG, opener=FakeOpener(http_error(code, b"secret body")))
+                self.assertEqual(result, (False, self.SERVER))
+                self.assertNotIn("secret body", repr(result))
+
+    def test_redirect_refused(self):
+        for first in (http_error(302), http_error(307),
+                      FakeResp(b"", 302, {"Location": "https://evil.example.com/"})):
+            with self.subTest(first=repr(first)):
+                op = FakeOpener(first, FakeResp(ok_body()))
+                result = llm_client.test_connection(CFG, opener=op)
+                self.assertEqual(result, (False, self.REDIRECT))
+                self.assertEqual(len(op.requests), 1)
+                self.assertNotIn("evil", repr(result))
+
+    def test_timeout(self):
+        for exc in (socket.timeout("timed out"), TimeoutError(),
+                    urllib.error.URLError(socket.timeout("t"))):
+            with self.subTest(exc=repr(exc)):
+                result = llm_client.test_connection(CFG, opener=FakeOpener(exc))
+                self.assertEqual(result, (False, self.TIMEOUT))
+                self.assertNotIn("timed out", repr(result))
+
+    def test_connect_failed(self):
+        for exc in (urllib.error.URLError(ConnectionRefusedError("sk-secret-123")),
+                    ConnectionResetError("x"), OSError("boom")):
+            with self.subTest(exc=repr(exc)):
+                result = llm_client.test_connection(CFG, opener=FakeOpener(exc))
+                self.assertEqual(result, (False, self.CONNECT))
+                self.assertNotIn("sk-secret", repr(result))
+                self.assertNotIn("boom", repr(result))
+
+    def test_bad_base_url_not_requested(self):
+        for url in ("ftp://x/y", "file:///etc/passwd", "no-scheme"):
+            with self.subTest(url=url):
+                op = FakeOpener()
+                result = llm_client.test_connection(dict(CFG, base_url=url), opener=op)
+                self.assertEqual(result, (False, self.CONNECT))
+                self.assertEqual(op.requests, [])
+
+    def test_unexpected_exception_is_generic(self):
+        result = llm_client.test_connection(CFG, opener=FakeOpener(RuntimeError("boom sk-secret-123")))
+        self.assertEqual(result, (False, self.SERVER))
+        self.assertEqual(result[1], self.SERVER)
+        for text in ("boom", "sk-secret-123"):
+            self.assertNotIn(text, repr(result))
+
+    def test_reasons_belong_to_fixed_set(self):
+        fixed = {self.OK, self.NOT_CONFIGURED, self.CONNECT, self.AUTH,
+                 self.SERVER, self.TIMEOUT, self.REDIRECT}
+        results = [
+            llm_client.test_connection(CFG, opener=FakeOpener(FakeResp(ok_body()))),
+            llm_client.test_connection(None, opener=FakeOpener()),
+            llm_client.test_connection(CFG, opener=FakeOpener(http_error(401))),
+            llm_client.test_connection(CFG, opener=FakeOpener(http_error(500, b"x"))),
+            llm_client.test_connection(CFG, opener=FakeOpener(TimeoutError())),
+            llm_client.test_connection(CFG, opener=FakeOpener(http_error(302))),
+        ]
+        for ok, reason in results:
+            self.assertIsInstance(ok, bool)
+            self.assertIn(reason, fixed)
+
+
 class DescribeImagesTests(unittest.TestCase):
     IMG = "data:image/png;base64,AAAA"
 
