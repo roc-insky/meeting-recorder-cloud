@@ -1,4 +1,5 @@
 """transcribe.py 的单元测试（假转写函数，不加载模型、不碰网络与真实目录）。"""
+import contextlib
 import io
 import struct
 import tempfile
@@ -174,6 +175,65 @@ class TranscribeWavTest(unittest.TestCase):
         self.assertIn("[00:00:00] 你好", text)
         self.assertNotIn("说话人", text)
 
+    def test_main_uses_diarize(self):
+        write_wav(self.dir / "meeting.wav", tone(2.0))
+        fake = lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": "你好", "no_speech_prob": 0.0}]}
+        diar = lambda samples, rate, speakers: [(0.0, 2.0, 0)]
+        code = transcribe.main([str(self.dir)], deps={"transcribe_fn": fake, "diarize_fn": diar})
+        self.assertEqual(code, 0)
+        text = (self.dir / "transcript.md").read_text(encoding="utf-8")
+        self.assertIn("说话人A:", text)
+        self.assertIn("- 说话人：说话人A", text)
+
+    def test_lazy_default_diarize_used_when_absent(self):
+        import diarize as diarize_mod
+
+        wav = self.dir / "meeting.wav"
+        write_wav(wav, tone(2.0))
+        fake = lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": "你好", "no_speech_prob": 0.0}]}
+        calls = []
+        orig_ensure, orig_run = diarize_mod.ensure_models, diarize_mod.diarize
+        diarize_mod.ensure_models = lambda *a, **k: calls.append("ensure")
+        diarize_mod.diarize = lambda samples, num_speakers=None, **k: (calls.append(("run", num_speakers)), [(0.0, 2.0, 0)])[1]
+        self.addCleanup(setattr, diarize_mod, "ensure_models", orig_ensure)
+        self.addCleanup(setattr, diarize_mod, "diarize", orig_run)
+        out = transcribe.transcribe_wav(wav, model="m", speakers=2, diarize=True, deps={"transcribe_fn": fake})
+        self.assertEqual(calls, ["ensure", ("run", 2)])
+        self.assertIn("[00:00:00] 说话人A: 你好", out)
+
+    def test_lazy_default_skipped_when_no_diarize(self):
+        import diarize as diarize_mod
+
+        wav = self.dir / "meeting.wav"
+        write_wav(wav, tone(2.0))
+        fake = lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": "你好", "no_speech_prob": 0.0}]}
+        orig_ensure = diarize_mod.ensure_models
+        diarize_mod.ensure_models = must_not_call
+        self.addCleanup(setattr, diarize_mod, "ensure_models", orig_ensure)
+        out = transcribe.transcribe_wav(wav, model="m", speakers=None, diarize=False, deps={"transcribe_fn": fake})
+        self.assertNotIn("说话人", out)
+
+    def test_lazy_default_download_failure_falls_back(self):
+        import diarize as diarize_mod
+
+        wav = self.dir / "meeting.wav"
+        write_wav(wav, tone(2.0))
+        fake = lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": "你好", "no_speech_prob": 0.0}]}
+
+        def no_net(*a, **k):
+            raise OSError("无网络")
+
+        orig_ensure = diarize_mod.ensure_models
+        diarize_mod.ensure_models = no_net
+        self.addCleanup(setattr, diarize_mod, "ensure_models", orig_ensure)
+        err = io.StringIO()
+        code = transcribe.main([str(wav)], deps={"transcribe_fn": fake, "stderr": err})
+        self.assertEqual(code, 0)
+        self.assertIn("下载", err.getvalue())
+        text = (self.dir / "transcript.md").read_text(encoding="utf-8")
+        self.assertIn("[00:00:00] 你好", text)
+        self.assertNotIn("说话人", text)
+
     def test_main_accepts_meeting_dir(self):
         write_wav(self.dir / "meeting.wav", tone(1.0))
         fake = lambda audio, **kw: {"segments": []}
@@ -188,7 +248,7 @@ class TranscribeWavTest(unittest.TestCase):
         self.assertIn("找不到", err.getvalue())
 
     def test_speakers_and_no_diarize_exclusive(self):
-        with self.assertRaises(SystemExit) as cm:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             transcribe.main(["x.wav", "--speakers", "2", "--no-diarize"])
         self.assertEqual(cm.exception.code, 2)
 

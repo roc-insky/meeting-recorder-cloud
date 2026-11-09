@@ -2,7 +2,7 @@
 
 deps 字典（均可选，便于测试与后续扩展，新增键不影响旧调用）：
   transcribe_fn(audio, **kwargs) -> {"segments": [...]}   替换 mlx_whisper.transcribe
-  diarize_fn(samples_int16, rate, speakers) -> list[Turn]  说话人区分；默认 None 即不区分
+  diarize_fn(samples_int16, rate, speakers) -> list[Turn]  说话人区分；缺省用 _default_diarize_fn（延迟导入 diarize，必要时下载模型）
   stderr                                                   警告输出流，默认 sys.stderr
   started                                                  会议开始时间（datetime），默认由 wav 修改时间推算
 """
@@ -116,6 +116,21 @@ def _resample(samples: np.ndarray, rate: int) -> np.ndarray:
     return np.interp(x, np.arange(samples.size), samples.astype(np.float64)).astype(np.int16)
 
 
+class _ModelDownloadError(Exception):
+    """说话人模型下载失败（用于给出更具体的警告）。"""
+
+
+def _default_diarize_fn(samples, rate, speakers):
+    """默认说话人区分：延迟导入 diarize（避免未使用时加载 sherpa-onnx），缺模型先下载。"""
+    import diarize
+
+    try:
+        diarize.ensure_models()
+    except Exception as e:
+        raise _ModelDownloadError(e) from e
+    return diarize.diarize(samples, num_speakers=speakers)
+
+
 def _speaker_sort_key(spk):
     return (isinstance(spk, str), spk)
 
@@ -147,8 +162,8 @@ def transcribe_wav(wav: Path, *, model: str = DEFAULT_MODEL, speakers=None, diar
         transcribe_samples(samples16k, model=model, transcribe_fn=deps.get("transcribe_fn"))
     )
 
-    diarize_fn = deps.get("diarize_fn")
-    if diarize and diarize_fn is not None and segs:
+    diarize_fn = deps.get("diarize_fn") or _default_diarize_fn
+    if diarize and segs:
         try:
             turns = diarize_fn(samples16k, common.SAMPLE_RATE, speakers)
             assigned = assign_speakers(segs, turns)
@@ -161,8 +176,11 @@ def transcribe_wav(wav: Path, *, model: str = DEFAULT_MODEL, speakers=None, diar
                     speakers=[speaker_label(s) for s in found],
                     assigned=assigned,
                 )
+        except _ModelDownloadError as e:
+            print(f"警告：说话人模型下载失败，已输出无标签文字稿（{e.__cause__}）", file=stderr)
         except Exception as e:  # 区分失败不影响文字稿
             print(f"警告：说话人区分失败，已输出无标签文字稿（{e}）", file=stderr)
+    # 声纹识别（后续任务）在此处用独立的 try/except，不要并入上面的区分流程
     return render(segs, started=started, duration=duration)
 
 
