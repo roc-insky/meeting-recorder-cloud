@@ -48,7 +48,7 @@ import meeting_store
 import meeting_summary
 import voiceprint
 import web_config
-from meeting_controller import Busy, MeetingStartError, link_exclusive
+from meeting_controller import AudioUnreadable, Busy, MeetingStartError, link_exclusive
 from meeting_store import MeetingNotFound
 from voiceprint_service import JobNotFound
 
@@ -400,6 +400,10 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
     async def _start_error(_req, exc):
         return _error(503, str(exc) or "录音没能开始")
 
+    @app.exception_handler(AudioUnreadable)
+    async def _audio_unreadable(_req, _exc):
+        return _error(422, "录音文件损坏，无法转写")
+
     @app.exception_handler(ValueError)
     async def _value_error(_req, exc):
         msg = str(exc)
@@ -474,7 +478,20 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
     # ---- 会议 ----
     @app.get("/api/meetings")
     def meetings_list():
-        return {"meetings": meeting_store.list_meetings(root)}
+        items = meeting_store.list_meetings(root)
+        incomplete = set(meeting_store.list_incomplete(root, controller.transcribing_ids()))
+        for item in items:
+            item["incomplete"] = item["id"] in incomplete
+        return {"meetings": items}
+
+    @app.post("/api/meetings/{meeting_id}/retranscribe")
+    def meeting_retranscribe(meeting_id: str, body: dict = Depends(optional_body)):
+        _check_keys(body, ("force",))
+        force = body.get("force", False)
+        if type(force) is not bool:
+            raise ApiError(400, "force 必须是布尔值")
+        controller.retranscribe(meeting_id, force=force)
+        return {"ok": True, "id": meeting_id}
 
     @app.get("/api/meetings/{meeting_id}")
     def meeting_detail(meeting_id: str):

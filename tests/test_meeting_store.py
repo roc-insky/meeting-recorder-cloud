@@ -75,6 +75,29 @@ class ListMeetingsTests(StoreTestCase):
         self.assertEqual(meeting_store.list_meetings(self.root)[0]["title"], "2026-11-09_1030")
 
 
+class ListIncompleteTests(StoreTestCase):
+    def test_four_kinds_and_order(self):
+        a = self.mk("2026-11-09_1030")
+        (a / "meeting.wav").write_bytes(b"RIFF")
+        b = self.mk("2026-11-09_0900", transcript=True)
+        (b / "meeting.wav").write_bytes(b"RIFF")
+        self.mk("2026-11-08_1700", transcript=True)          # 有稿无音频
+        c = self.mk("2026-11-08_0900")                       # 有音频无稿，但正在转写
+        (c / "meeting.wav").write_bytes(b"RIFF")
+        self.mk("2026-11-07_0900")                            # 空目录
+        self.assertEqual(meeting_store.list_incomplete(self.root, {"2026-11-08_0900"}),
+                         ["2026-11-09_1030"])
+        self.assertEqual(meeting_store.list_incomplete(self.root, []),
+                         ["2026-11-09_1030", "2026-11-08_0900"])
+        self.assertEqual(meeting_store.list_incomplete(self.root / "missing", []), [])
+
+    def test_never_opens_files(self):
+        d = self.mk("a")
+        (d / "meeting.wav").write_bytes(b"RIFF")
+        with mock.patch("builtins.open", side_effect=AssertionError("list_incomplete 不允许打开文件")):
+            self.assertEqual(meeting_store.list_incomplete(self.root, ()), ["a"])
+
+
 class ResolveTests(StoreTestCase):
     def test_valid(self):
         d = self.mk("2026-11-09_1030")

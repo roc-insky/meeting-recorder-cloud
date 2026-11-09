@@ -8,9 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
+import common
 import meeting_controller
 import voiceprint_service
-from meeting_controller import MeetingBusy, MeetingController, MeetingStartError
+from meeting_controller import (AlreadyTranscribed, AudioUnreadable, MeetingBusy,
+                                MeetingController, MeetingStartError)
+from tests.test_common import make_wav_bytes
 
 WAIT = 5.0  # 仅作为“不会无限挂起”的上限，正常路径靠 Event 立即返回
 
@@ -63,14 +66,20 @@ class FakeTranscriber:
         self.gate.set()
         self.entered = threading.Event()
         self.error = None
+        self.exc = None
+        self.text = None
         self.calls = []
 
     def __call__(self, meeting_dir, *, speakers):
         self.calls.append((Path(meeting_dir).name, speakers))
         self.entered.set()
         self.gate.wait(WAIT)
+        if self.exc is not None:
+            raise self.exc
         if self.error:
             raise RuntimeError(self.error)
+        if self.text is not None:
+            (Path(meeting_dir) / "transcript.md").write_text(self.text, encoding="utf-8")
 
 
 class ControllerCase(unittest.TestCase):
@@ -751,6 +760,118 @@ class RealWiringTests(unittest.TestCase):
             self.assertEqual(snap["final"], "failed", snap)
             self.assertIn("损坏", snap["error"] or "")
             self.assertEqual((mdir / "transcript.md").read_text(encoding="utf-8"), "旧文字稿")
+
+
+class RetranscribeTests(ControllerCase):
+    MID = "2026-11-09_1030"
+
+    def mk(self, mid=MID, *, transcript=None, samples=b"\x00\x00" * 1600, wav_bytes=None):
+        d = self.root / mid
+        d.mkdir(parents=True, exist_ok=True)
+        if wav_bytes is not None:
+            (d / "meeting.wav").write_bytes(wav_bytes)
+        elif samples is not None:
+            (d / "meeting.wav").write_bytes(make_wav_bytes(samples))
+        if transcript is not None:
+            (d / "transcript.md").write_text(transcript, encoding="utf-8")
+        return d
+
+    def test_retranscribe_fills_gap(self):
+        d = self.mk()
+        self.tr.text = "# 会议\n\n[00:00:01] 你好\n"
+        self.ctl.retranscribe(self.MID)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), self.tr.text)
+        self.assertEqual(self.tr.calls, [(self.MID, None)])
+        self.assertEqual(self.ctl.transcribing_ids(), set())
+
+    def test_retranscribe_busy_while_transcribing(self):
+        self.mk()
+        self.tr.gate.clear()
+        self.addCleanup(self.tr.gate.set)
+        errors = []
+
+        def work():
+            try:
+                self.ctl.retranscribe(self.MID)
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        t = threading.Thread(target=work, name="test-retranscribe")
+        t.start()
+        self.assertTrue(self.tr.entered.wait(WAIT))
+        try:
+            with self.assertRaises(MeetingBusy):
+                self.ctl.retranscribe(self.MID)
+            self.assertEqual(len(self.tr.calls), 1)
+            self.assertIn(self.MID, self.ctl.transcribing_ids())
+        finally:
+            self.tr.gate.set()
+            t.join(WAIT)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_retranscribe_busy_while_recording(self):
+        self.ctl.start()
+        try:
+            with self.assertRaises(MeetingBusy):
+                self.ctl.retranscribe(self.MID)
+            self.assertEqual(self.tr.calls, [])   # 补转写没有启动
+        finally:
+            self.ctl.stop()
+        self.wait_final(self.ctl, "completed")
+        self.assertEqual(self.tr.calls, [(self.MID, None)])  # 只有停止后的正常转写
+
+    def test_existing_transcript_untouched(self):
+        d = self.mk(transcript="旧稿\n")
+        with self.assertRaises(AlreadyTranscribed):
+            self.ctl.retranscribe(self.MID)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), "旧稿\n")
+        self.assertFalse((d / "transcript.md.bak").exists())
+        self.assertEqual(self.tr.calls, [])
+
+    def test_force_makes_bak(self):
+        d = self.mk(transcript="旧稿\n")
+        (d / "transcript.md.bak").write_text("更旧的\n", encoding="utf-8")
+        self.tr.text = "新稿\n"
+        self.ctl.retranscribe(self.MID, force=True)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), "新稿\n")
+        self.assertEqual((d / "transcript.md.bak").read_text(encoding="utf-8"), "旧稿\n")
+        self.assertEqual(self.tr.calls, [(self.MID, None)])
+
+    def test_set_cleared_on_failure(self):
+        self.mk()
+        self.tr.exc = common.MalformedAudioError("坏")
+        with self.assertRaises(AudioUnreadable):
+            self.ctl.retranscribe(self.MID)
+        self.assertNotIn(self.MID, self.ctl.transcribing_ids())
+        self.tr.exc = RuntimeError("模型炸了")
+        with self.assertRaises(RuntimeError):
+            self.ctl.retranscribe(self.MID)
+        self.assertNotIn(self.MID, self.ctl.transcribing_ids())
+        self.tr.exc = None
+        self.tr.text = "补好了\n"
+        self.ctl.retranscribe(self.MID)
+        self.assertEqual((self.root / self.MID / "transcript.md").read_text(encoding="utf-8"), "补好了\n")
+
+    def test_bad_wav_message(self):
+        self.mk(wav_bytes=b"not a wav at all")
+        with self.assertRaises(AudioUnreadable) as cm:
+            self.ctl.retranscribe(self.MID)
+        self.assertEqual(str(cm.exception), "录音文件损坏，无法转写")
+        self.assertEqual(self.tr.calls, [])
+        self.assertNotIn(self.MID, self.ctl.transcribing_ids())
+
+    def test_normal_transcription_tracks_set(self):
+        self.tr.gate.clear()
+        self.tr.text = "正常稿\n"
+        self.addCleanup(self.tr.gate.set)
+        self.ctl.start()
+        self.ctl.stop()
+        self.assertTrue(self.tr.entered.wait(WAIT))
+        self.assertIn(self.MID, self.ctl.transcribing_ids())
+        self.tr.gate.set()
+        self.wait_final(self.ctl, "completed")
+        self.assertNotIn(self.MID, self.ctl.transcribing_ids())
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ from typing import Callable, Optional
 
 import common
 import live
+import meeting_store
 import record
 import transcribe
 
@@ -56,6 +57,14 @@ class MeetingBusy(Busy):
 
 class MeetingStartError(Exception):
     """录音没能开始（打不开麦克风、磁盘不足等），消息可直接展示。"""
+
+
+class AlreadyTranscribed(Busy):
+    """该会议已有文字稿；重新转写需要显式 force。"""
+
+
+class AudioUnreadable(Exception):
+    """录音文件损坏或为空，无法补转写；Web 层映射为 422。"""
 
 
 def link_exclusive(controller, service) -> None:
@@ -109,6 +118,7 @@ class MeetingController:
         self._stop_evt: Optional[threading.Event] = None
         self._record_thread: Optional[threading.Thread] = None
         self._transcribe_thread: Optional[threading.Thread] = None
+        self._transcribing: set[str] = set()  # 正在转写的会议 id（正常转写与补转写都进出）
         self._closed = False
 
     # ---------- 互斥 ----------
@@ -124,9 +134,55 @@ class MeetingController:
     def is_active(self, meeting_id) -> bool:
         """该会议是否正在录音或转写；Web 层据此拒绝删除/改名（409）。"""
         with self._cond:
+            if meeting_id is not None and meeting_id in self._transcribing:
+                return True
             if meeting_id is None or meeting_id != self._meeting_id:
                 return False
             return self._recording or self._final == "running"
+
+    def transcribing_ids(self) -> set[str]:
+        """当前正在转写的会议 id 副本（供列表标记未完成）。"""
+        with self._cond:
+            return set(self._transcribing)
+
+    def retranscribe(self, meeting_id: str, *, force: bool = False) -> None:
+        """为中断的会议补转写；force=True 时先把旧稿改名为 transcript.md.bak。
+
+        同步执行到转写结束，便于调用方直接知道成功与否。
+        录音中、同一会议正在转写 → MeetingBusy；已有文字稿且未 force → AlreadyTranscribed；
+        录音缺失/损坏/为空 → AudioUnreadable（消息可直接展示）。
+        """
+        if type(force) is not bool:
+            raise ValueError("force 必须是布尔值")
+        meeting_dir = meeting_store.resolve(self._root, meeting_id)
+        transcript = meeting_dir / "transcript.md"
+        with self._cond:
+            if self._closed:
+                raise MeetingBusy("服务正在关闭")
+            if self._recording:
+                raise MeetingBusy("正在录音，请先停止录音")
+            if meeting_id in self._transcribing:
+                raise MeetingBusy("该会议正在转写，请稍候")
+            if transcript.is_file() and not force:
+                raise AlreadyTranscribed("该会议已有文字稿；重新转写会覆盖旧稿")
+            self._transcribing.add(meeting_id)
+        try:
+            wav = meeting_dir / "meeting.wav"
+            if not wav.is_file():
+                raise AudioUnreadable("录音文件损坏，无法转写")
+            try:
+                common.read_wav_tolerant(wav)
+            except (common.MalformedAudioError, ValueError, OSError) as e:
+                raise AudioUnreadable("录音文件损坏，无法转写") from e
+            if force and transcript.is_file():
+                transcript.replace(meeting_dir / "transcript.md.bak")
+            try:
+                self._transcribe_fn(meeting_dir, speakers=None)
+            except (common.MalformedAudioError, ValueError) as e:
+                raise AudioUnreadable("录音文件损坏，无法转写") from e
+        finally:
+            with self._cond:
+                self._transcribing.discard(meeting_id)
 
     # ---------- 快照与事件 ----------
     def _elapsed_locked(self) -> float:
@@ -237,7 +293,7 @@ class MeetingController:
                     raise MeetingBusy("服务正在关闭")
                 if self._recording:
                     raise MeetingBusy("正在录音，请先停止")
-                if self._final == "running":
+                if self._final == "running" or self._transcribing:
                     raise MeetingBusy("上一场会议还在转写，请稍候")
                 if self._peer_busy():
                     raise MeetingBusy("正在登记声纹，请稍后再录音")
@@ -418,6 +474,7 @@ class MeetingController:
                 self._emit_locked("final", {"status": "failed", "meeting_id": None})
             else:
                 self._final = "running"
+                self._transcribing.add(self._meeting_id)
                 mdir = self._root / self._meeting_id
                 t = threading.Thread(target=self._transcribe_main, args=(mdir, speakers),
                                      name="mr-transcribe", daemon=True)
@@ -433,6 +490,7 @@ class MeetingController:
         except Exception as e:  # noqa: BLE001
             error = f"转写失败（{e}）"
         with self._cond:
+            self._transcribing.discard(meeting_dir.name)
             mid = self._meeting_id
             if error is None:
                 self._final = "completed"

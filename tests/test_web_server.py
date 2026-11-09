@@ -16,6 +16,7 @@ import record
 import voiceprint
 import web_server
 from meeting_controller import MeetingController
+from tests.test_common import make_wav_bytes
 from tests.test_meeting_controller import FakeClock, FakeRecorder, FakeTranscriber
 from voiceprint_service import VoiceprintService
 
@@ -101,13 +102,15 @@ class AppCase(unittest.TestCase):
     def post(self, url, **kw):
         return self.mut("POST", url, **kw)
 
-    def make_meeting(self, mid=MID, transcript=None, live=None):
+    def make_meeting(self, mid=MID, transcript=None, live=None, wav=None):
         d = self.root / mid
         d.mkdir(parents=True)
         if transcript is not None:
             (d / "transcript.md").write_text(transcript, encoding="utf-8")
         if live is not None:
             (d / "live.txt").write_text(live, encoding="utf-8")
+        if wav is not None:
+            (d / "meeting.wav").write_bytes(wav)
         return d
 
     def wait_final(self, want="completed"):
@@ -128,6 +131,7 @@ class OriginGuardTests(AppCase):
         ("POST", "/api/recording/start"), ("POST", "/api/recording/stop"),
         ("PATCH", f"/api/meetings/{MID}"), ("DELETE", f"/api/meetings/{MID}"),
         ("POST", f"/api/meetings/{MID}/annotations"),
+        ("POST", f"/api/meetings/{MID}/retranscribe"),
         ("DELETE", "/api/voiceprints/x"), ("POST", "/api/voiceprints/jobs"),
         ("POST", "/api/voiceprints/jobs/abc/cancel"),
     ]
@@ -449,6 +453,75 @@ class MeetingRouteTests(AppCase):
                 r = self.mut(method, url, **kw)
                 self.assertEqual(r.status_code, 404)
                 self.assertIn("error", r.json())
+
+
+class RetranscribeRouteTests(AppCase):
+    OLD = "2026-11-08_0900"
+    WAV = make_wav_bytes(b"\x00\x00" * 1600)
+
+    def url(self, mid=None):
+        return f"/api/meetings/{mid or self.OLD}/retranscribe"
+
+    def test_list_incomplete_field(self):
+        self.make_meeting(MID, transcript="旧稿")
+        self.make_meeting(self.OLD, wav=self.WAV)
+        self.make_meeting("2026-11-07_0900")
+        items = {m["id"]: m for m in self.client.get("/api/meetings").json()["meetings"]}
+        self.assertIs(items[MID]["incomplete"], False)
+        self.assertIs(items[self.OLD]["incomplete"], True)
+        self.assertIs(items["2026-11-07_0900"]["incomplete"], False)
+
+    def test_retranscribe_success_fills_transcript(self):
+        d = self.make_meeting(self.OLD, wav=self.WAV)
+        self.tr.text = "# 会议\n\n[00:00:01] 补好了\n"
+        r = self.post(self.url(), json={"force": False})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["id"], self.OLD)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), self.tr.text)
+        self.assertEqual(self.tr.calls, [(self.OLD, None)])
+        items = {m["id"]: m for m in self.client.get("/api/meetings").json()["meetings"]}
+        self.assertIs(items[self.OLD]["incomplete"], False)      # 补转写后徽标消失
+        self.assertIs(items[self.OLD]["has_transcript"], True)
+
+    def test_busy_while_recording_409(self):
+        self.make_meeting(self.OLD, wav=self.WAV)
+        self.assertEqual(self.post("/api/recording/start").status_code, 200)
+        try:
+            r = self.post(self.url(), json={"force": False})
+            self.assertEqual(r.status_code, 409)
+            self.assertIn("error", r.json())
+            self.assertEqual(self.tr.calls, [])
+        finally:
+            self.assertEqual(self.post("/api/recording/stop").status_code, 200)
+            self.wait_final()
+
+    def test_bad_wav_422(self):
+        self.make_meeting(self.OLD, wav=b"not a wav at all")
+        r = self.post(self.url(), json={"force": False})
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["error"], "录音文件损坏，无法转写")
+        self.assertEqual(self.tr.calls, [])
+
+    def test_non_json_content_type_415(self):
+        r = self.post(self.url(), content=b"{}", headers={"content-type": "text/plain"})
+        self.assertEqual(r.status_code, 415)
+        self.assertIn("error", r.json())
+
+    def test_existing_transcript_409_unless_force(self):
+        d = self.make_meeting(self.OLD, transcript="旧稿\n", wav=self.WAV)
+        r = self.post(self.url(), json={})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), "旧稿\n")
+        self.tr.text = "新稿\n"
+        self.assertEqual(self.post(self.url(), json={"force": True}).status_code, 200)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), "新稿\n")
+        self.assertEqual((d / "transcript.md.bak").read_text(encoding="utf-8"), "旧稿\n")
+
+    def test_bad_force_400(self):
+        self.make_meeting(self.OLD, wav=self.WAV)
+        r = self.post(self.url(), json={"force": "yes"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("error", r.json())
 
 
 class TraversalTests(AppCase):

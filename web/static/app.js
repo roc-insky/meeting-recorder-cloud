@@ -317,8 +317,28 @@ function renderHistory() {
     const del = h('button', { type: 'button', class: 'small danger', 'aria-label': '删除会议：' + m.title, disabled: active });
     del.textContent = '删除';
     del.addEventListener('click', () => deleteMeeting(m, del));
+    const parts = [title];
+    if (m.incomplete) {
+      parts.push(h('span', {
+        class: 'hist-badge',
+        style: 'font-size:11px;color:#b45309;border:1px solid #f59e0b;border-radius:4px;padding:0 4px;white-space:nowrap;',
+        text: '未完成',
+      }));
+    }
+    if (m.incomplete || m.has_transcript) {
+      const force = !!m.has_transcript;
+      const retry = h('button', {
+        type: 'button', class: 'small',
+        'aria-label': (force ? '重新转写：' : '补转写：') + m.title,
+        disabled: active,
+      });
+      retry.textContent = force ? '重新转写' : '补转写';
+      retry.addEventListener('click', () => retranscribeMeeting(m, retry, force));
+      parts.push(retry);
+    }
+    parts.push(edit, del);
     const cls = 'hist-item' + (m.id === S.viewId ? ' current' : '') + (m.has_transcript ? '' : ' no-text');
-    return h('li', { class: cls }, [title, edit, del]);
+    return h('li', { class: cls }, parts);
   });
   list.replaceChildren(...items);
   $('history-empty').hidden = items.length > 0;
@@ -334,6 +354,20 @@ async function renameMeeting(m, btn) {
       toast('标题已更新');
       await loadHistory();
       renderTranscript();
+    } catch (e) {
+      toast(errText(e), true);
+    }
+  });
+}
+
+async function retranscribeMeeting(m, btn, force) {
+  if (force && !window.confirm('重新转写会覆盖现有文字稿；旧稿会先备份为 transcript.md.bak。继续？')) return;
+  await busy('retranscribe:' + m.id, [btn], async () => {
+    try {
+      await api('POST', '/api/meetings/' + encodeURIComponent(m.id) + '/retranscribe', { force: Boolean(force) });
+      toast(force ? '已重新转写，旧稿备份为 transcript.md.bak' : '补转写完成');
+      await loadHistory();
+      if (S.viewId === m.id) await selectMeeting(m.id);
     } catch (e) {
       toast(errText(e), true);
     }

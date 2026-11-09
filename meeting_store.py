@@ -3,6 +3,7 @@ import json
 import math
 import shutil
 import threading
+from collections.abc import Collection
 from pathlib import Path
 
 import common
@@ -42,6 +43,28 @@ def list_meetings(root: Path) -> list[dict]:
         {"id": p.name, "title": get_title(p), "has_transcript": (p / _TRANSCRIPT).is_file()}
         for p in entries
     ]
+
+
+def list_incomplete(root: Path, transcribing: Collection[str]) -> list[str]:
+    """有录音、没文字稿、且不在转写中的会议 id，新到旧；只做 stat，不打开文件。"""
+    root = Path(root)
+    try:
+        entries = [p for p in root.iterdir() if _is_meeting_dir(p)]
+    except OSError:
+        return []
+    busy = set(transcribing or ())
+    out = []
+    for p in entries:
+        if p.name in busy:
+            continue
+        try:
+            if not (p / "meeting.wav").is_file() or (p / _TRANSCRIPT).is_file():
+                continue
+        except OSError:
+            continue
+        out.append(p.name)
+    out.sort(reverse=True)
+    return out
 
 
 def resolve(root: Path, meeting_id) -> Path:
