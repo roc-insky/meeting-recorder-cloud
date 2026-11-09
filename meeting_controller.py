@@ -36,6 +36,7 @@ import live
 import meeting_store
 import record
 import transcribe
+import voiceprint
 
 SPEAKERS_MIN = 1
 SPEAKERS_MAX = 20
@@ -161,11 +162,15 @@ class MeetingController:
                 raise MeetingBusy("服务正在关闭")
             if self._recording:
                 raise MeetingBusy("正在录音，请先停止录音")
+            if self._final == "running":
+                raise MeetingBusy("上一场会议还在转写，请稍候")
             if meeting_id in self._transcribing:
                 raise MeetingBusy("该会议正在转写，请稍候")
             if transcript.is_file() and not force:
                 raise AlreadyTranscribed("该会议已有文字稿；重新转写会覆盖旧稿")
             self._transcribing.add(meeting_id)
+        backup = meeting_dir / "transcript.md.bak"
+        renamed = False
         try:
             wav = meeting_dir / "meeting.wav"
             if not wav.is_file():
@@ -175,11 +180,20 @@ class MeetingController:
             except (common.MalformedAudioError, ValueError, OSError) as e:
                 raise AudioUnreadable("录音文件损坏，无法转写") from e
             if force and transcript.is_file():
-                transcript.replace(meeting_dir / "transcript.md.bak")
+                transcript.replace(backup)
+                renamed = True
             try:
                 self._transcribe_fn(meeting_dir, speakers=None)
             except (common.MalformedAudioError, ValueError) as e:
                 raise AudioUnreadable("录音文件损坏，无法转写") from e
+        except BaseException:
+            # 重新转写失败时把旧稿换回去，绝不让用户的文字稿只停留在 .bak 里
+            if renamed and backup.is_file() and not transcript.is_file():
+                try:
+                    backup.replace(transcript)
+                except OSError:
+                    pass
+            raise
         finally:
             with self._cond:
                 self._transcribing.discard(meeting_id)
@@ -545,16 +559,27 @@ def make_record_fn(*, stream_factory=None, now=datetime.now, free_bytes_fn=commo
     return record_fn
 
 
-def make_transcribe_fn(*, model: str = transcribe.DEFAULT_MODEL, deps=None, run=None):
-    """会后处理：压缩 m4a（失败只警告）→ transcribe_wav → 原子写 transcript.md。"""
+def make_transcribe_fn(*, model: str = transcribe.DEFAULT_MODEL, deps=None, run=None,
+                      config_path=None):
+    """会后处理：压缩 m4a（失败只警告）→ transcribe_wav → 原子写 transcript.md。
+
+    config_path 不为空时从 config.toml 读 [voiceprint] 的 high/low（非法则打印中文警告并
+    回退默认值），使 Web 录音与命令行用同一套阈值；为空时沿用 transcribe_wav 的内置默认档。
+    """
     deps = dict(deps or {})
+    thresholds = None
+    if config_path is not None:
+        thresholds = voiceprint.load_thresholds(config_path)
+        if thresholds.warning and deps.get("stderr") is not None:
+            deps["stderr"].write(thresholds.warning + "\n")
 
     def transcribe_fn(meeting_dir, *, speakers):
         meeting_dir = Path(meeting_dir)
         wav = meeting_dir / "meeting.wav"
         kwargs = {"run": run} if run is not None else {}
         record.compress_m4a(wav, meeting_dir / "meeting.m4a", stderr=deps.get("stderr"), **kwargs)
-        text = transcribe.transcribe_wav(wav, model=model, speakers=speakers, deps=deps)
+        text = transcribe.transcribe_wav(wav, model=model, speakers=speakers, deps=deps,
+                                         thresholds=thresholds)
         common.atomic_write_text(meeting_dir / "transcript.md", text)
     return transcribe_fn
 

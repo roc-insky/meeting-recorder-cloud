@@ -27,7 +27,8 @@ def build_app(*, config_path=CONFIG_PATH, root=None):
     controller = meeting_controller.MeetingController(
         root,
         record_fn=meeting_controller.make_record_fn(),
-        transcribe_fn=meeting_controller.make_transcribe_fn(deps={"stderr": sys.stderr}),
+        transcribe_fn=meeting_controller.make_transcribe_fn(
+            deps={"stderr": sys.stderr}, config_path=config_path),
         live_factory=meeting_controller.build_live_factory(deps={"stderr": sys.stderr}, stderr=sys.stderr),
     )
     service = voiceprint_service.VoiceprintService()

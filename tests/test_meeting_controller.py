@@ -10,6 +10,7 @@ import numpy as np
 
 import common
 import meeting_controller
+import voiceprint
 import voiceprint_service
 from meeting_controller import (AlreadyTranscribed, AudioUnreadable, MeetingBusy,
                                 MeetingController, MeetingStartError)
@@ -762,6 +763,39 @@ class RealWiringTests(unittest.TestCase):
             self.assertEqual((mdir / "transcript.md").read_text(encoding="utf-8"), "旧文字稿")
 
 
+    def _thresholds_from_config(self, body, *, stderr=None):
+        """用临时 config.toml 调 make_transcribe_fn，返回真正传给 transcribe_wav 的 thresholds。"""
+        import subprocess
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config.toml"
+            cfg.write_text(body, encoding="utf-8")
+            mdir = Path(d) / "2026-11-09_1030"
+            mdir.mkdir()
+            (mdir / "meeting.wav").write_bytes(make_wav_bytes(b"\x00\x00" * 1600))
+            tr_fn = meeting_controller.make_transcribe_fn(
+                run=lambda args, **kw: subprocess.CompletedProcess(args, 1, b"", b""),
+                deps={"stderr": stderr or io.StringIO()}, config_path=cfg)
+            with mock.patch.object(meeting_controller.transcribe, "transcribe_wav",
+                                   return_value="# 稿\n") as fake:
+                tr_fn(mdir, speakers=None)
+            self.assertEqual((mdir / "transcript.md").read_text(encoding="utf-8"), "# 稿\n")
+            return fake.call_args.kwargs["thresholds"]
+
+    def test_transcribe_fn_reads_voiceprint_thresholds(self):
+        """config.toml 的 [voiceprint] 必须真的传到 transcribe_wav（Web 录音也按配置分档）。"""
+        self.assertEqual(
+            self._thresholds_from_config("[voiceprint]\nhigh = 0.7\nlow = 0.4\n"),
+            voiceprint.Thresholds(0.7, 0.4, None))
+
+    def test_transcribe_fn_warns_on_bad_thresholds(self):
+        err = io.StringIO()
+        th = self._thresholds_from_config("[voiceprint]\nhigh = 0.2\nlow = 0.4\n", stderr=err)
+        self.assertEqual((th.high, th.low), (voiceprint.DEFAULT_HIGH, voiceprint.DEFAULT_LOW))
+        self.assertIn("声纹阈值无效", err.getvalue())
+
+
 class RetranscribeTests(ControllerCase):
     MID = "2026-11-09_1030"
 
@@ -821,6 +855,19 @@ class RetranscribeTests(ControllerCase):
         self.wait_final(self.ctl, "completed")
         self.assertEqual(self.tr.calls, [(self.MID, None)])  # 只有停止后的正常转写
 
+    def test_busy_while_other_meeting_transcribing(self):
+        """别的会议正在后台转写时不再并发补转写，避免重复加载模型。"""
+        self.mk()
+        with self.ctl._cond:
+            self.ctl._final = "running"
+        try:
+            with self.assertRaises(MeetingBusy):
+                self.ctl.retranscribe(self.MID)
+            self.assertEqual(self.tr.calls, [])
+        finally:
+            with self.ctl._cond:
+                self.ctl._final = "idle"
+
     def test_existing_transcript_untouched(self):
         d = self.mk(transcript="旧稿\n")
         with self.assertRaises(AlreadyTranscribed):
@@ -837,6 +884,16 @@ class RetranscribeTests(ControllerCase):
         self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), "新稿\n")
         self.assertEqual((d / "transcript.md.bak").read_text(encoding="utf-8"), "旧稿\n")
         self.assertEqual(self.tr.calls, [(self.MID, None)])
+
+    def test_force_failure_restores_transcript(self):
+        """重新转写失败时旧稿必须回到 transcript.md，不能只剩 .bak。"""
+        d = self.mk(transcript="旧稿\n")
+        self.tr.exc = RuntimeError("模型炸了")
+        with self.assertRaises(RuntimeError):
+            self.ctl.retranscribe(self.MID, force=True)
+        self.assertEqual((d / "transcript.md").read_text(encoding="utf-8"), "旧稿\n")
+        self.assertFalse((d / "transcript.md.bak").exists())
+        self.assertNotIn(self.MID, self.ctl.transcribing_ids())
 
     def test_set_cleared_on_failure(self):
         self.mk()
