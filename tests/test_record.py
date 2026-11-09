@@ -234,6 +234,39 @@ class OpenStreamTest(unittest.TestCase):
         self.assertTrue(s.exited)
 
 
+class LingeringStreamThreadsTest(unittest.TestCase):
+    def test_counts_alive_stream_threads(self):
+        base = record.lingering_stream_threads()
+        done = threading.Event()
+
+        def work():
+            done.wait(5)
+
+        t = threading.Thread(target=work, name=record.STREAM_THREAD_PREFIX + "probe", daemon=True)
+        t.start()
+        try:
+            self.assertEqual(record.lingering_stream_threads(), base + 1)
+        finally:
+            done.set()
+            t.join(5)
+        self.assertEqual(record.lingering_stream_threads(), base)
+
+    def test_ignores_other_threads(self):
+        base = record.lingering_stream_threads()
+        done = threading.Event()
+
+        def work():
+            done.wait(5)
+
+        t = threading.Thread(target=work, name="unrelated-worker", daemon=True)
+        t.start()
+        try:
+            self.assertEqual(record.lingering_stream_threads(), base)
+        finally:
+            done.set()
+            t.join(5)
+
+
 class RecordTest(unittest.TestCase):
     def test_no_empty_dir_when_open_fails(self):
         with tempfile.TemporaryDirectory() as d:

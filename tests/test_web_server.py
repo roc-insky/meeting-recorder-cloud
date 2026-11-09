@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -928,6 +929,76 @@ class WebEntryTests(unittest.TestCase):
         self.assertEqual(kw["port"], 9123)
         self.assertEqual(kw["workers"], 1)
         self.assertIs(kw["reload"], False)
+
+
+class DoctorTests(AppCase):
+    """自检接口：只读、不泄露路径与 Key、麦克风卡死也按时返回。"""
+
+    def deps(self, **over):
+        base = {
+            "list_input_devices": lambda: ["内置麦克风"],
+            "free_bytes": lambda: 10 * 1024 ** 3,
+            "models_missing": lambda: [],
+            "llm_config": lambda: {"base_url": "http://127.0.0.1:1/v1",
+                                   "api_key": "SECRET-KEY", "model": "m"},
+            "voiceprint_modes": lambda: [0o100600],
+            "lingering_threads": lambda: 0,
+            "llm_test": lambda cfg: (False, "认证失败"),
+        }
+        base.update(over)
+        return base
+
+    def doctor_client(self, **over):
+        app = web_server.create_app(self.ctl, root=self.root, config_path=self.config,
+                                    voiceprint_service=self.svc, doctor_deps=self.deps(**over))
+        return TestClient(app, base_url=f"http://127.0.0.1:{PORT}", raise_server_exceptions=False)
+
+    def test_doctor_get_no_paths_and_all_ok(self):
+        r = self.doctor_client().get("/api/doctor")
+        self.assertEqual(r.status_code, 200)
+        checks = r.json()["checks"]
+        self.assertEqual([c["name"] for c in checks],
+                         ["麦克风", "磁盘", "模型缓存", "大模型配置", "声纹文件权限", "残留音频线程"])
+        self.assertEqual([c["status"] for c in checks], ["ok"] * 6)
+        self.assertNotIn(str(Path.home()), r.text)
+        self.assertNotIn("SECRET-KEY", r.text)
+
+    def test_doctor_get_is_readonly(self):
+        called = []
+        with mock.patch.object(web_server.llm_client, "test_connection",
+                               side_effect=AssertionError("自检不应联网")):
+            r = self.doctor_client(models_missing=lambda: called.append("models") or []).get("/api/doctor")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(called, ["models"])
+
+    def test_llm_test_requires_origin(self):
+        client = self.doctor_client()
+        self.assertEqual(client.post("/api/doctor/llm-test").status_code, 403)
+        r = client.post("/api/doctor/llm-test",
+                        headers={"Origin": f"http://127.0.0.1:{PORT}", "Content-Type": "text/plain"},
+                        content=b"x")
+        self.assertEqual(r.status_code, 415)
+
+    def test_llm_test_never_leaks_key(self):
+        r = self.doctor_client().post("/api/doctor/llm-test", headers=ORIGIN, json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"ok": False, "reason": "认证失败"})
+        self.assertNotIn("SECRET-KEY", r.text)
+
+    def test_doctor_get_returns_while_mic_hangs(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        start = time.monotonic()
+        r = self.doctor_client(
+            list_input_devices=lambda: (release.wait(30), ["内置麦克风"])[1]
+        ).get("/api/doctor")
+        elapsed = time.monotonic() - start
+        release.set()
+        self.assertEqual(r.status_code, 200)
+        self.assertLess(elapsed, 5.0)
+        mic = r.json()["checks"][0]
+        self.assertEqual(mic["status"], "fail")
+        self.assertEqual(mic["detail"], "设备枚举无响应")
 
 
 if __name__ == "__main__":

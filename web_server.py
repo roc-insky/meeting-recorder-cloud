@@ -27,6 +27,7 @@ import contextlib
 import json
 import logging
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -41,11 +42,15 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import common
+import diarize
+import doctor
 import interview_questions
 import interview_store
+import live
 import llm_client
 import meeting_store
 import meeting_summary
+import record
 import voiceprint
 import web_config
 from meeting_controller import AudioUnreadable, Busy, MeetingStartError, link_exclusive
@@ -311,6 +316,31 @@ def _read_text(meeting_dir: Path, name: str):
         return None
 
 
+# ---------- 自检的默认依赖（只读；测试通过 doctor_deps 注入假实现） ----------
+def _list_input_devices() -> list[str]:
+    """只枚举输入设备名称；sounddevice 延迟导入，未装音频依赖时由 doctor 记为故障。"""
+    import sounddevice as sd
+
+    return [str(d.get("name", "")) for d in sd.query_devices() if d.get("max_input_channels", 0) > 0]
+
+
+def _free_bytes() -> int:
+    return shutil.disk_usage(Path.home()).free
+
+
+def _models_missing() -> list[str]:
+    """说话人区分与实时转写两套模型；任一缺失都算缺失。"""
+    return diarize.models_present(diarize.MODEL_DIR) + live.models_present(diarize.MODEL_DIR)
+
+
+def _voiceprint_modes() -> list[int]:
+    """已登记声纹文件的权限位；目录不存在视为未登记。"""
+    d = Path(voiceprint.PROFILE_DIR)
+    if not d.is_dir():
+        return []
+    return [p.stat().st_mode for p in d.glob("*.json") if p.is_file()]
+
+
 # ---------- 应用 ----------
 def _check_images(images) -> list:
     """校验简历图片：≤5 张，data:image/(png|jpeg|webp|gif);base64,，合法 base64，解码后 ≤5MB；否则 422。"""
@@ -337,10 +367,11 @@ def _check_images(images) -> list:
 
 
 def create_app(controller, *, root, config_path, voiceprint_service, port: int | None = None,
-               llm_opener=None, job_store=None) -> FastAPI:
+               llm_opener=None, job_store=None, doctor_deps: dict | None = None) -> FastAPI:
     """组装 FastAPI 应用；port 缺省取 config.toml 的 [web] port（默认 8765）。
 
     llm_opener：测试用假 opener（缺省真实 opener）；job_store：职位库，缺省 config_path 同目录的 jobs.json。
+    doctor_deps：自检用假依赖（键同 doctor.run_checks 的注入参数名，另可给 llm_test(cfg)->(bool, str)）。
     """
     root = Path(root)
     if job_store is None:
@@ -474,6 +505,33 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
     def recording_stop():
         controller.stop()
         return controller.snapshot()
+
+    # ---- 自检 ----
+    deps = dict(doctor_deps or {})
+    list_devices = deps.get("list_input_devices", _list_input_devices)
+    free_bytes = deps.get("free_bytes", _free_bytes)
+    models_missing = deps.get("models_missing", _models_missing)
+    voiceprint_modes = deps.get("voiceprint_modes", _voiceprint_modes)
+    lingering_threads = deps.get("lingering_threads", record.lingering_stream_threads)
+    llm_config_getter = deps.get("llm_config", lambda: web_config.load_llm(config_path))
+    llm_test = deps.get("llm_test", lambda cfg: llm_client.test_connection(cfg, opener=llm_opener))
+
+    @app.get("/api/doctor")
+    def doctor_checks():
+        checks = doctor.run_checks(
+            list_input_devices=list_devices,
+            free_bytes=free_bytes,
+            models_missing=models_missing,
+            llm_config=llm_config_getter(),
+            voiceprint_modes=voiceprint_modes,
+            lingering_threads=lingering_threads,
+        )
+        return {"checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks]}
+
+    @app.post("/api/doctor/llm-test")
+    def doctor_llm_test():
+        ok, reason = llm_test(llm_config_getter())
+        return {"ok": bool(ok), "reason": str(reason)}
 
     # ---- 会议 ----
     @app.get("/api/meetings")

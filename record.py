@@ -122,6 +122,17 @@ class SilenceWatch:
         return False
 
 
+STREAM_THREAD_PREFIX = "mr-stream-"
+
+
+def lingering_stream_threads() -> int:
+    """仍存活的开/关麦克风流线程数（自检用）；线程名统一以 mr-stream- 开头。"""
+    return sum(
+        1 for t in threading.enumerate()
+        if t.name.startswith(STREAM_THREAD_PREFIX) and t.is_alive()
+    )
+
+
 def open_stream(factory: Callable[[], ContextManager], timeout: float = STREAM_OPEN_TIMEOUT_S):
     """在守护线程 mr-stream-open 里调用 factory() 并进入上下文，返回该上下文对象。
 
@@ -151,7 +162,7 @@ def open_stream(factory: Callable[[], ContextManager], timeout: float = STREAM_O
                 pass
         done.set()
 
-    threading.Thread(target=work, name="mr-stream-open", daemon=True).start()
+    threading.Thread(target=work, name=STREAM_THREAD_PREFIX + "open", daemon=True).start()
     try:
         finished = done.wait(timeout)
     except BaseException:
@@ -185,7 +196,7 @@ def close_stream(cm, timeout: float = STREAM_CLOSE_TIMEOUT_S) -> bool:
             pass
         done.set()
 
-    threading.Thread(target=work, name="mr-stream-close", daemon=True).start()
+    threading.Thread(target=work, name=STREAM_THREAD_PREFIX + "close", daemon=True).start()
     return done.wait(timeout)
 
 

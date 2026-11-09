@@ -92,6 +92,16 @@
         <p id="summary-prompt" class="hint" role="status">选择有文字稿的会议后可生成纪要（需在 config.toml 配置 [llm]）。</p>
         <div id="summary-result" class="result" aria-live="polite"></div>
       </section>
+
+      <section class="panel" aria-labelledby="doctor-heading">
+        <h2 id="doctor-heading">自检</h2>
+        <ul id="doctor-list" class="doctor-list"></ul>
+        <div class="control-row">
+          <button type="button" id="doctor-refresh">重新检查</button>
+          <button type="button" id="doctor-llm-test">测试连接</button>
+        </div>
+        <p id="doctor-status" class="hint" role="status">正在检查…</p>
+      </section>
     </aside>
   </div>
 </section>

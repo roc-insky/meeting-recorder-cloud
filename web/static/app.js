@@ -929,6 +929,51 @@ async function pollVpBusy() {
   if (S.vpBusy) vpBusyTimer = setTimeout(pollVpBusy, VP_BUSY_POLL_MS);
 }
 
+// ---------- 自检 ----------
+const DOCTOR_STATUS = { ok: '正常', warn: '注意', fail: '故障' };
+
+/** 六项自检：内容全部走 textContent，后端只给固定中文短句（不含路径）。 */
+function renderDoctor(checks) {
+  const items = checks.map((c) => {
+    const li = h('li');
+    const status = DOCTOR_STATUS[c.status] || '未知';
+    li.textContent = String(c.name || '') + '：' + status + (c.detail ? '（' + c.detail + '）' : '');
+    return li;
+  });
+  $('doctor-list').replaceChildren(...items);
+}
+
+async function loadDoctor() {
+  const status = $('doctor-status');
+  status.hidden = false;
+  status.textContent = '正在检查…';
+  try {
+    const r = await api('GET', '/api/doctor');
+    renderDoctor(Array.isArray(r.checks) ? r.checks : []);
+    status.textContent = '检查完成';
+  } catch (e) {
+    status.textContent = errText(e);
+  }
+}
+
+/** 测试大模型连接：只把后端给的固定中文原因显示出来，不显示地址或 Key。 */
+async function testLlmConnection(btn) {
+  const status = $('doctor-status');
+  await busy('doctor-llm-test', [btn], async () => {
+    try {
+      const r = await api('POST', '/api/doctor/llm-test');
+      const msg = (r.ok ? '连接正常：' : '连接失败：') + String(r.reason || '');
+      status.hidden = false;
+      status.textContent = msg;
+      toast(msg, !r.ok);
+    } catch (e) {
+      status.hidden = false;
+      status.textContent = errText(e);
+      toast(errText(e), true);
+    }
+  });
+}
+
 // ---------- 初始化 ----------
 async function loadState() {
   try {
@@ -954,6 +999,8 @@ function init() {
   $('vp-form').addEventListener('submit', startVoiceprint);
   $('vp-refresh').addEventListener('click', loadVoiceprints);
   $('vp-cancel').addEventListener('click', cancelVoiceprint);
+  $('doctor-refresh').addEventListener('click', loadDoctor);
+  $('doctor-llm-test').addEventListener('click', (e) => testLlmConnection(e.currentTarget));
   const dlg = $('voiceprint-dialog');
   dlg.addEventListener('cancel', () => { cancelVoiceprint(); });     // Esc
   dlg.addEventListener('close', () => { cancelVoiceprint(); });      // 其他方式关闭
@@ -963,6 +1010,7 @@ function init() {
   refreshControls();
   loadState().then(() => { connectEvents(); });
   loadHistory();
+  loadDoctor();
 }
 
 document.addEventListener('DOMContentLoaded', init);
