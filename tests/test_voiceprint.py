@@ -458,6 +458,119 @@ class LabelTurnsTest(unittest.TestCase):
         self.assertEqual(out, [(0.0, 0.5, 0)])
 
 
+class LabelTurnsWithScoresTest(unittest.TestCase):
+    """按聚类分档：假音频的段首样本作标记，假 extractor 按标记返回预设向量。"""
+
+    def make_audio(self, marks):
+        parts = []
+        for m in marks:
+            seg = speech(5.0)
+            seg[0] = m  # 用首样本标记这一段属于谁
+            parts.append(seg)
+        return np.concatenate(parts)
+
+    def make_extractor(self, table):
+        def extractor(x):
+            mark = int(round(float(x[0]) * 32768.0))
+            return table[mark]
+
+        return extractor
+
+    @staticmethod
+    def at_score(score: float) -> np.ndarray:
+        """与 unit_vec(0) 余弦恰为 score 的单位向量（放在前两维）。"""
+        v = np.zeros(DIM)
+        v[0] = score
+        v[1] = np.sqrt(1.0 - score * score)
+        return v
+
+    def test_cluster_high_score_gets_real_name(self):
+        samples = self.make_audio([1])
+        turns = [(0.0, 5.0, 0), (5.0, 10.0, 0)]
+        ext = self.make_extractor({1: unit_vec(0)})
+        th = voiceprint.Thresholds(0.6, 0.4)
+        out, scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles={"张三": unit_vec(0)}, extractor=ext, thresholds=th
+        )
+        self.assertEqual([t[2] for t in out], ["张三", "张三"])
+        self.assertEqual(scores, {"张三": 1.0})
+
+    def test_cluster_gray_zone_gets_suspect(self):
+        """整段聚类都拿灰区分（0.5），不是逐句判断。"""
+        samples = self.make_audio([1])
+        turns = [(0.0, 5.0, 0), (5.0, 10.0, 0)]
+        ext = self.make_extractor({1: self.at_score(0.5)})
+        out, scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles={"张三": unit_vec(0)}, extractor=ext,
+            thresholds=voiceprint.Thresholds(0.6, 0.4),
+        )
+        self.assertEqual([t[2] for t in out], ["疑似张三", "疑似张三"])
+        self.assertAlmostEqual(scores["疑似张三"], 0.5, places=6)
+
+    def test_cluster_low_stays_anonymous(self):
+        samples = self.make_audio([1])
+        turns = [(0.0, 5.0, 0)]
+        ext = self.make_extractor({1: self.at_score(0.3)})
+        out, scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles={"张三": unit_vec(0)}, extractor=ext,
+            thresholds=voiceprint.Thresholds(0.6, 0.4),
+        )
+        self.assertEqual(out, turns)
+        self.assertEqual(scores, {})
+
+    def test_two_clusters_same_person_only_best_gets_name(self):
+        """两个聚类都匹配张三：只有分高的拿名字，另一个保持匿名（不写疑似）。"""
+        samples = self.make_audio([1, 2])
+        turns = [(0.0, 5.0, 0), (5.0, 10.0, 1)]
+        ext = self.make_extractor({1: self.at_score(0.9), 2: self.at_score(0.7)})
+        out, scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles={"张三": unit_vec(0)}, extractor=ext,
+            thresholds=voiceprint.Thresholds(0.6, 0.4),
+        )
+        self.assertEqual([t[2] for t in out], ["张三", 1])
+        self.assertEqual(scores, {"张三": 0.9})
+
+    def test_loser_of_same_name_does_not_borrow_second_choice(self):
+        """分低的聚类即使对别的声纹分也够，也不退而取次高名字（每个聚类只看最高分）。"""
+        samples = self.make_audio([1, 2])
+        turns = [(0.0, 5.0, 0), (5.0, 10.0, 1)]
+        # 聚类 2 与张三、李四的分都过 low，但最高分是张三（已被聚类 1 拿走）
+        mixed = np.zeros(DIM)
+        mixed[0], mixed[1] = 0.7, 0.6
+        mixed = mixed / np.linalg.norm(mixed)
+        ext = self.make_extractor({1: self.at_score(0.9), 2: mixed})
+        profiles = {"张三": unit_vec(0), "李四": unit_vec(1)}
+        out, _scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles=profiles, extractor=ext,
+            thresholds=voiceprint.Thresholds(0.6, 0.4),
+        )
+        self.assertEqual([t[2] for t in out], ["张三", 1])
+
+    def test_no_profiles_output_unchanged(self):
+        samples = self.make_audio([1])
+        turns = [(0.0, 2.0, 0), (2.0, 5.0, 1)]
+
+        def boom(x):
+            raise AssertionError("无声纹时不应提取向量")
+
+        out, scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles={}, extractor=boom, thresholds=voiceprint.Thresholds(0.6, 0.4)
+        )
+        self.assertEqual(out, turns)
+        self.assertEqual(scores, {})
+
+    def test_thresholds_none_falls_back_to_single_threshold(self):
+        """不传 thresholds 时沿用旧的单阈值语义：达阈值即真名，没有灰区。"""
+        samples = self.make_audio([1])
+        turns = [(0.0, 5.0, 0)]
+        ext = self.make_extractor({1: self.at_score(0.5)})
+        out, scores = voiceprint.label_turns_with_scores(
+            turns, samples, profiles={"张三": unit_vec(0)}, extractor=ext, threshold=0.4
+        )
+        self.assertEqual([t[2] for t in out], ["张三"])
+        self.assertAlmostEqual(scores["张三"], 0.5, places=6)
+
+
 class DefaultExtractorTest(unittest.TestCase):
     def test_import_does_not_load_sherpa(self):
         import subprocess

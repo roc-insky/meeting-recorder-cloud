@@ -6,6 +6,7 @@ deps 字典（均可选，便于测试与后续扩展，新增键不影响旧调
   extractor(samples_float32) -> 向量                       声纹提取；缺省用 voiceprint.default_extractor（仅在已登记声纹时才延迟加载）
   stderr                                                   警告输出流，默认 sys.stderr
   started                                                  会议开始时间（datetime），默认由 wav 修改时间推算
+  config_path                                              config.toml 路径，默认项目目录下的 config.toml（只读 [voiceprint] 阈值）
 """
 import argparse
 import sys
@@ -18,6 +19,7 @@ import common
 import voiceprint
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"   # 不存在也能跑，[voiceprint] 缺省用内置阈值
 NO_SPEECH_THRESHOLD = 0.6
 EMPTY_NOTE = "（未识别到语音）"
 
@@ -137,8 +139,8 @@ def _speaker_sort_key(spk):
     return (isinstance(spk, str), spk)
 
 
-def _apply_voiceprint(turns, samples16k, threshold, deps, stderr):
-    """用已登记声纹给说话人聚类改名；任何失败只警告并原样返回 turns。
+def _apply_voiceprint(turns, samples16k, thresholds, deps, stderr):
+    """用已登记声纹给说话人聚类分档改名；任何失败只警告并原样返回 turns。
 
     没有登记声纹时直接返回，不创建 extractor（不加载嵌入模型）。
     """
@@ -147,9 +149,10 @@ def _apply_voiceprint(turns, samples16k, threshold, deps, stderr):
         if not profiles:
             return turns
         extractor = deps.get("extractor") or voiceprint.default_extractor()
-        return voiceprint.label_turns(
-            turns, samples16k, profiles=profiles, extractor=extractor, threshold=threshold
+        labeled, _scores = voiceprint.label_turns_with_scores(
+            turns, samples16k, profiles=profiles, extractor=extractor, thresholds=thresholds
         )
+        return labeled
     except Exception as e:  # 声纹失败不影响说话人区分结果
         print(f"警告：声纹识别失败，已保留说话人A/B 标签（{e}）", file=stderr)
         return turns
@@ -162,13 +165,15 @@ def transcribe_wav(
     speakers=None,
     diarize: bool = True,
     voice: bool = True,
-    voice_threshold: float = voiceprint.DEFAULT_THRESHOLD,
+    voice_threshold: float | None = None,
+    thresholds: voiceprint.Thresholds | None = None,
     deps=None,
 ) -> str:
     """转写 wav 并返回文字稿文本。
 
     零长度或静音不调用模型；说话人区分出错只警告并退回无标签文字稿；
     声纹识别出错只警告并保留说话人A/B 标签。
+    thresholds 优先；否则 voice_threshold 作单阈值（无灰区）；都没给用内置默认档。
     """
     deps = deps or {}
     stderr = deps.get("stderr", sys.stderr)
@@ -203,7 +208,13 @@ def transcribe_wav(
             print(f"警告：说话人区分失败，已输出无标签文字稿（{e}）", file=stderr)
         if turns and voice:
             # 声纹识别用独立的 try/except（在 _apply_voiceprint 内），失败不影响区分结果
-            turns = _apply_voiceprint(turns, samples16k, voice_threshold, deps, stderr)
+            if thresholds is not None:
+                th = thresholds
+            elif voice_threshold is not None:
+                th = voiceprint.Thresholds(voice_threshold, voice_threshold)  # 旧单阈值语义，无灰区
+            else:
+                th = voiceprint.Thresholds(voiceprint.DEFAULT_HIGH, voiceprint.DEFAULT_LOW)
+            turns = _apply_voiceprint(turns, samples16k, th, deps, stderr)
         try:
             assigned = assign_speakers(segs, turns or [])
             found = sorted({spk for _s, spk in assigned if spk is not None}, key=_speaker_sort_key)
@@ -244,8 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-diarize", action="store_true", help="不区分说话人")
     p.add_argument("--model", default=DEFAULT_MODEL, help="转写模型")
     p.add_argument("--no-voiceprint", action="store_true", help="不做声纹识别")
-    p.add_argument("--voice-threshold", type=float, metavar="X", default=voiceprint.DEFAULT_THRESHOLD,
-                   help=f"声纹相似度阈值（默认 {voiceprint.DEFAULT_THRESHOLD}，未校准）")
+    p.add_argument("--voice-threshold", type=float, metavar="X", default=None,
+                   help="声纹高阈值（覆盖 config.toml 的 [voiceprint] high；未校准）")
     return p
 
 
@@ -253,6 +264,10 @@ def main(argv=None, *, deps=None) -> int:
     args = build_parser().parse_args(argv)
     deps = deps or {}
     stderr = deps.get("stderr", sys.stderr)
+    # 阈值问题只警告，不中断转写
+    thresholds = voiceprint.load_thresholds(deps.get("config_path", CONFIG_PATH), cli_high=args.voice_threshold)
+    if thresholds.warning:
+        print(f"警告：{thresholds.warning}", file=stderr)
     path = Path(args.path)
     wav = path / "meeting.wav" if path.is_dir() else path
     if not wav.is_file():
@@ -265,7 +280,7 @@ def main(argv=None, *, deps=None) -> int:
             speakers=args.speakers,
             diarize=not args.no_diarize,
             voice=not args.no_voiceprint,
-            voice_threshold=args.voice_threshold,
+            thresholds=thresholds,
             deps=deps,
         )
         common.atomic_write_text(wav.parent / "transcript.md", text)

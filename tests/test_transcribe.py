@@ -305,7 +305,12 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         write_wav(self.wav, tone(2.0))
 
     def deps(self, **extra):
-        base = {"transcribe_fn": self.FAKE, "diarize_fn": lambda s, r, n: [(0.0, 2.0, 1)], "started": self.STARTED}
+        base = {
+            "transcribe_fn": self.FAKE,
+            "diarize_fn": lambda s, r, n: [(0.0, 2.0, 1)],
+            "started": self.STARTED,
+            "config_path": self.dir / "config.toml",   # 隔离真实 config.toml
+        }
         base.update(extra)
         return base
 
@@ -347,14 +352,52 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertIn("说话人B: 你好", text)
 
     def test_voice_threshold_option(self):
+        """--voice-threshold 只覆盖 high：低于它写疑似，达到才写真名。"""
         voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
         ext = lambda x: np.eye(512)[1]  # 与声纹正交，分数 0
         code = transcribe.main([str(self.wav), "--voice-threshold", "0.5"], deps=self.deps(extractor=ext))
         self.assertEqual(code, 0)
         self.assertIn("说话人B: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
-        code = transcribe.main([str(self.wav), "--voice-threshold", "-1"], deps=self.deps(extractor=ext))
+        # 与声纹的分数恰为 0.8
+        near = lambda x: np.eye(512)[0] * 0.8 + np.eye(512)[1] * 0.6
+        code = transcribe.main([str(self.wav), "--voice-threshold", "0.7"], deps=self.deps(extractor=near))
         self.assertEqual(code, 0)
         self.assertIn("张三: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
+        code = transcribe.main([str(self.wav), "--voice-threshold", "0.9"], deps=self.deps(extractor=near))
+        self.assertEqual(code, 0)
+        self.assertIn("疑似张三: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
+
+    def test_voice_threshold_invalid_warns_and_continues(self):
+        """--voice-threshold 低于配置 low：只警告并退回默认值，转写照常完成。"""
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
+        cfg = self.dir / "config.toml"
+        cfg.write_text("[voiceprint]\nhigh = 0.6\nlow = 0.4\n", encoding="utf-8")
+        err = io.StringIO()
+        code = transcribe.main(
+            [str(self.wav), "--voice-threshold", "0.3"],
+            deps=self.deps(stderr=err, config_path=cfg, extractor=lambda x: np.eye(512)[0]),
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("阈值", err.getvalue())
+        self.assertRegex(err.getvalue(), r"[\u4e00-\u9fff]")
+        self.assertIn("张三: 你好", (self.dir / "transcript.md").read_text(encoding="utf-8"))
+
+    def test_config_thresholds_gray_label(self):
+        """config.toml 的 high/low 生效：0.6 分在 high=0.8 下写疑似。"""
+        voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
+        cfg = self.dir / "config.toml"
+        cfg.write_text("[voiceprint]\nhigh = 0.8\nlow = 0.4\n", encoding="utf-8")
+        near = np.zeros(512)
+        near[0], near[1] = 0.6, 0.8
+        err = io.StringIO()
+        code = transcribe.main(
+            [str(self.wav)], deps=self.deps(stderr=err, config_path=cfg, extractor=lambda x: near)
+        )
+        self.assertEqual(code, 0)
+        text = (self.dir / "transcript.md").read_text(encoding="utf-8")
+        self.assertIn("- 说话人：疑似张三", text)
+        self.assertIn("[00:00:00] 疑似张三: 你好", text)
+        self.assertEqual(err.getvalue(), "")
 
     def test_voiceprint_failure_keeps_diarize_labels(self):
         voiceprint.save_profile("张三", np.eye(512)[0], seconds=1, chunks=1, model=voiceprint.MODEL_NAME)
@@ -408,7 +451,7 @@ class VoiceprintIntegrationTest(unittest.TestCase):
         self.assertEqual(args.voice_threshold, 0.7)
         args = transcribe.build_parser().parse_args(["x.wav"])
         self.assertFalse(args.no_voiceprint)
-        self.assertEqual(args.voice_threshold, voiceprint.DEFAULT_THRESHOLD)
+        self.assertIsNone(args.voice_threshold)  # 未指定：不覆盖配置里的 high
 
 
 if __name__ == "__main__":

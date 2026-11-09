@@ -357,35 +357,64 @@ def _cluster_audio(turns, samples: np.ndarray) -> dict:
     return {spk: np.concatenate(p) for spk, p in parts.items() if total[spk] >= MIN_CLUSTER_SECONDS * rate}
 
 
-def label_turns(turns, samples, *, profiles, extractor, threshold: float = DEFAULT_THRESHOLD):
-    """把说话人聚类与已登记声纹比对，达阈值的整个聚类改名为声纹名字。
+def label_turns_with_scores(
+    turns,
+    samples,
+    *,
+    profiles,
+    extractor,
+    threshold: float = DEFAULT_THRESHOLD,
+    thresholds: Thresholds | None = None,
+):
+    """按说话人聚类分档改名，返回 (标注后的 turns, {显示名: 该聚类最高分})。
 
-    每个聚类最多一个名字，同一个名字只给得分最高的聚类；无声纹时原样返回。
+    每个聚类只取它与所有声纹的最高匹配分，再用 classify_score 决定：
+    ≥ high 写声纹名字，≥ low 写“疑似X”，否则保持原标签（整段聚类统一，不逐句判断）。
+    同一个声纹名字只给得分最高的那个聚类，其余聚类保持原标签。
+    thresholds 为 None 时退回旧的单阈值语义（用 threshold 当 high，无灰区）。
+    无声纹或没有 turns 时原样返回，scores 为空字典。
     """
+    th = thresholds if thresholds is not None else Thresholds(threshold, threshold)
     if not profiles or not turns:
-        return list(turns)
+        return list(turns), {}
+    order = {}
+    for _s, _e, spk in turns:
+        order.setdefault(spk, len(order))
     candidates = []
     for spk, audio in _cluster_audio(turns, samples).items():
         try:
             vec = embed(audio, extractor=extractor)
         except VoiceprintError:
             continue  # 这个聚类提不出声纹，保持原标签
+        best_name, best_score = None, None
         for name, prof in profiles.items():
             score = cosine(vec, prof)
-            if score >= threshold:
-                candidates.append((score, spk, name))
-    # 得分从高到低贪心分配：聚类和名字都只用一次
-    order = {}
-    for _s, _e, spk in turns:
-        order.setdefault(spk, len(order))
+            if best_score is None or score > best_score:
+                best_name, best_score = name, score
+        if classify_score(best_score, th) != "anonymous":
+            candidates.append((best_score, spk, best_name))
+    # 得分从高到低贪心分配：一个名字只给一个聚类
     candidates.sort(key=lambda c: (-c[0], order[c[1]], c[2]))
-    rename, used = {}, set()
-    for _score, spk, name in candidates:
-        if spk in rename or name in used:
+    rename, scores, used = {}, {}, set()
+    for score, spk, name in candidates:
+        if name in used:
             continue
-        rename[spk] = name
         used.add(name)
-    return [(s, e, rename.get(spk, spk)) for s, e, spk in turns]
+        label = name if classify_score(score, th) == "named" else suspect_label(name)
+        rename[spk] = label
+        scores[label] = score
+    return [(s, e, rename.get(spk, spk)) for s, e, spk in turns], scores
+
+
+def label_turns(turns, samples, *, profiles, extractor, threshold: float = DEFAULT_THRESHOLD):
+    """把说话人聚类与已登记声纹比对，达阈值的整个聚类改名为声纹名字。
+
+    旧接口：单阈值，不产生“疑似”标签；返回值与原来一致。
+    """
+    labeled, _scores = label_turns_with_scores(
+        turns, samples, profiles=profiles, extractor=extractor, threshold=threshold
+    )
+    return labeled
 
 
 def default_extractor():
