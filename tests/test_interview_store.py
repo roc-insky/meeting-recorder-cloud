@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import common
 import interview_store
 from interview_store import JobNotFound, JobStore
 
@@ -102,7 +103,54 @@ class JobCrudTests(StoreCase):
         self.assertEqual(self.store.list(), [])
         job = self.store.create("后端", "甲", "")
         self.assertEqual(JobStore(self.path).list(), [job])
-        self.assertTrue((self.path.parent / "jobs.json.corrupt").exists())
+        backups = sorted(self.path.parent.glob("jobs.json.*.corrupt"))
+        self.assertEqual([b.read_text(encoding="utf-8") for b in backups], ["{坏的"])
+
+    def _backups(self):
+        return sorted(self.path.parent.glob("jobs.json.*.corrupt"))
+
+    def test_read_never_mutates_corrupt_file(self):
+        self.path.write_text("{坏的", encoding="utf-8")
+        self.assertEqual(self.store.list(), [])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "{坏的")
+        self.assertEqual(self._backups(), [])
+
+    def test_wrong_shape_backed_up_before_write(self):
+        original = json.dumps({"jobs": [{"id": "x"}]}, ensure_ascii=False)
+        self.path.write_text(original, encoding="utf-8")
+        self.store.create("后端", "甲", "")
+        self.assertEqual([b.read_text(encoding="utf-8") for b in self._backups()], [original])
+
+    def test_rejected_entries_backed_up_before_write(self):
+        good = {"id": "a" * 32, "type": "后端", "title": "好", "requirements": "",
+                "created_at": "2026-11-09T10:00:00+08:00", "updated_at": "2026-11-09T10:00:00+08:00"}
+        original = json.dumps([good, {"id": 1, "title": "被拒绝的原件"}], ensure_ascii=False)
+        self.path.write_text(original, encoding="utf-8")
+        self.store.update(good["id"], "前端", "改", "")
+        self.assertEqual([b.read_text(encoding="utf-8") for b in self._backups()], [original])
+
+    def test_clean_file_makes_no_backup(self):
+        a = self.store.create("后端", "甲", "")
+        self.store.update(a["id"], "后端", "乙", "")
+        self.store.delete(a["id"])
+        self.assertEqual(self._backups(), [])
+
+    def test_two_corruptions_two_distinct_backups(self):
+        self.path.write_text("{一", encoding="utf-8")
+        self.store.create("后端", "甲", "")
+        self.path.write_text("{二", encoding="utf-8")
+        self.store.create("后端", "乙", "")
+        self.assertEqual(sorted(b.read_text(encoding="utf-8") for b in self._backups()), ["{一", "{二"])
+
+    def test_backup_failure_aborts_write_and_keeps_original(self):
+        self.path.write_text("{坏的", encoding="utf-8")
+        with mock.patch("common.shutil.copyfile", side_effect=OSError("磁盘满")):
+            for op in (lambda: self.store.create("后端", "甲", ""),
+                       lambda: self.store.delete("nope")):
+                with self.assertRaises(common.DataProtectionError):
+                    op()
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "{坏的")
+        self.assertEqual(self._backups(), [])
 
     def test_invalid_entries_skipped_on_load(self):
         good = {"id": "a" * 32, "type": "后端", "title": "好", "requirements": "",

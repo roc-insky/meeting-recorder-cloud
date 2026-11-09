@@ -79,6 +79,40 @@ class MalformedAudioError(AudioError):
     """文件不是合法 wav（RIFF 头、块结构或格式字段损坏）；不能当作“没有语音”处理。"""
 
 
+class DataProtectionError(Exception):
+    """无法为将被改写的原始数据留档时抛出；消息是中文，可直接展示。出现时写入必须中止。"""
+
+
+def backup_original(path: Path) -> Path:
+    """把 path 的完整原件复制到同目录的唯一文件 <名>.<时间戳>.corrupt，绝不覆盖已有备份，返回备份路径。
+
+    先用独占创建占位，保证两次留档（即使同一时刻）落在不同文件；复制失败则清掉占位并抛 DataProtectionError，
+    调用方必须据此中止写入，原件保持不动。
+    """
+    path = Path(path)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    n = 1
+    while True:
+        suffix = "" if n == 1 else f"-{n}"
+        candidate = path.with_name(f"{path.name}.{stamp}{suffix}.corrupt")
+        try:
+            with open(candidate, "xb"):
+                break                    # 占位成功
+        except FileExistsError:
+            n += 1
+        except OSError as e:
+            raise DataProtectionError(f"无法备份原文件 {path.name}，已取消写入（{e}）") from e
+    try:
+        shutil.copyfile(path, candidate)
+    except OSError as e:
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+        raise DataProtectionError(f"无法备份原文件 {path.name}，已取消写入（{e}）") from e
+    return candidate
+
+
 def read_wav_tolerant(path: Path) -> tuple[int, np.ndarray]:
     """容错读取 16 位 wav，返回 (采样率, int16 样本)。
 

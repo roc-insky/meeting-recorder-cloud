@@ -1,7 +1,6 @@
 """会议存储：列出、定位、标题、标注、删除与文字稿表头解析（只操作 root 下的会议目录）。"""
 import json
 import math
-import os
 import shutil
 import threading
 from pathlib import Path
@@ -123,6 +122,28 @@ def _load_annotations(meeting_dir: Path) -> list[dict]:
     return [a for a in data if _valid_annotation(a)]
 
 
+def _items_for_write(path: Path) -> list[dict]:
+    """写之前读出现有标注。文件损坏、形状不对或含被拒绝的条目时，先把完整原件备份到唯一路径再返回可保留部分；
+    备份失败抛 DataProtectionError（调用方不得继续写）。读取只在写路径上留档，纯读取不改动任何文件。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        raise common.DataProtectionError(f"无法读取标注文件，已取消写入（{e}）") from e
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if not isinstance(data, list):
+        common.backup_original(path)
+        return []
+    items = [a for a in data if _valid_annotation(a)]
+    if len(items) != len(data):
+        common.backup_original(path)     # 有条目将被丢弃：原件完整留档后才重写
+    return items
+
+
 def list_annotations(meeting_dir: Path) -> list[dict]:
     """标注列表，按 t 升序，同 t 保持插入顺序（稳定排序）。"""
     items = _load_annotations(Path(meeting_dir))
@@ -145,13 +166,7 @@ def add_annotation(meeting_dir: Path, kind, t, text) -> dict:
     record = {"kind": kind, "t": t, "text": text}
     path = meeting_dir / _ANNOTATIONS
     with _annotation_lock:
-        if path.exists() and _read_json(path) is None:
-            # 文件损坏：先留档再重建，避免静默丢掉用户数据
-            try:
-                os.replace(path, meeting_dir / (_ANNOTATIONS + ".corrupt"))
-            except OSError:
-                pass
-        items = _load_annotations(meeting_dir)
+        items = _items_for_write(path)
         items.append(record)
         common.atomic_write_text(path, json.dumps(items, ensure_ascii=False, indent=2) + "\n")
     return record

@@ -60,25 +60,36 @@ class JobStore:
         self.path = Path(path)
         self._lock = threading.Lock()
 
-    def _load(self) -> list[dict]:
-        """读文件；缺失返回 []；损坏时留档为 .corrupt 后当作空，非法条目跳过。"""
+    def _read(self) -> tuple[list[dict], bool]:
+        """只读：返回 (有效职位, 原文件是否含将被丢弃的内容)。缺失为 ([], False)；不改动任何文件。"""
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return []
-        except (OSError, ValueError):
-            self._quarantine()
-            return []
-        if not isinstance(data, list):
-            self._quarantine()
-            return []
-        return [j for j in data if _valid_entry(j)]
-
-    def _quarantine(self) -> None:
+            return [], False
+        except OSError as e:
+            raise common.DataProtectionError(f"无法读取职位文件，已取消写入（{e}）") from e
         try:
-            self.path.replace(self.path.with_name(self.path.name + ".corrupt"))
-        except OSError:
-            pass
+            data = json.loads(text)
+        except ValueError:
+            return [], True
+        if not isinstance(data, list):
+            return [], True
+        jobs = [j for j in data if _valid_entry(j)]
+        return jobs, len(jobs) != len(data)
+
+    def _load(self) -> list[dict]:
+        """读路径：容错过滤，绝不改动文件（损坏的原件留给写路径留档）。读不了文件时按空处理。"""
+        try:
+            return self._read()[0]
+        except common.DataProtectionError:
+            return []
+
+    def _load_for_write(self) -> list[dict]:
+        """写路径：若原件损坏、形状不对或含被拒绝条目，先完整备份到唯一路径；备份失败抛 DataProtectionError 中止写入。"""
+        jobs, dirty = self._read()
+        if dirty:
+            common.backup_original(self.path)
+        return jobs
 
     def _save(self, jobs: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,7 +108,7 @@ class JobStore:
     def create(self, type_, title, requirements="") -> dict:
         validate(type_, title, requirements)
         with self._lock:
-            jobs = self._load()
+            jobs = self._load_for_write()
             if len(jobs) >= MAX_JOBS:
                 raise ValueError(f"职位最多 {MAX_JOBS} 个，请先删除不用的")
             now = _now()
@@ -110,7 +121,7 @@ class JobStore:
     def update(self, job_id: str, type_, title, requirements="") -> dict:
         validate(type_, title, requirements)
         with self._lock:
-            jobs = self._load()
+            jobs = self._load_for_write()
             for j in jobs:
                 if j["id"] == job_id:
                     j.update(type=type_, title=title, requirements=requirements, updated_at=_now())
@@ -120,7 +131,7 @@ class JobStore:
 
     def delete(self, job_id: str) -> None:
         with self._lock:
-            jobs = self._load()
+            jobs = self._load_for_write()
             kept = [j for j in jobs if j["id"] != job_id]
             if len(kept) == len(jobs):
                 raise JobNotFound("职位不存在")

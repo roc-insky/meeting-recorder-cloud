@@ -4,8 +4,11 @@ import os
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
+import common
 import meeting_store
 from meeting_store import MeetingNotFound
 
@@ -239,7 +242,66 @@ class AnnotationTests(StoreTestCase):
         self.assertEqual(meeting_store.list_annotations(d), [])
         meeting_store.add_annotation(d, "note", 1, "新")
         self.assertEqual([a["text"] for a in meeting_store.list_annotations(d)], ["新"])
-        self.assertEqual((d / "annotations.json.corrupt").read_text(encoding="utf-8"), "{oops")
+        backups = sorted(d.glob("annotations.json.*.corrupt"))
+        self.assertEqual([b.read_text(encoding="utf-8") for b in backups], ["{oops"])
+
+    def _backups(self, d):
+        return sorted(d.glob("annotations.json.*.corrupt"))
+
+    def test_wrong_shape_json_is_backed_up_before_replacement(self):
+        d = self.mk("a")
+        original = json.dumps({"annotations": [{"kind": "note", "t": 1, "text": "珍贵"}]}, ensure_ascii=False)
+        (d / "annotations.json").write_text(original, encoding="utf-8")
+        self.assertEqual(meeting_store.list_annotations(d), [])      # 只读不改动
+        self.assertEqual(self._backups(d), [])
+        meeting_store.add_annotation(d, "note", 1, "新")
+        backups = self._backups(d)
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), original)
+
+    def test_rejected_entries_are_backed_up_before_rewrite(self):
+        d = self.mk("a")
+        original = json.dumps([{"kind": "note", "t": 2, "text": "ok"}, {"kind": "bad", "t": 1, "text": "留着"}],
+                              ensure_ascii=False)
+        (d / "annotations.json").write_text(original, encoding="utf-8")
+        meeting_store.add_annotation(d, "note", 3, "新")
+        self.assertEqual([a["text"] for a in meeting_store.list_annotations(d)], ["ok", "新"])
+        self.assertEqual([b.read_text(encoding="utf-8") for b in self._backups(d)], [original])
+
+    def test_clean_file_makes_no_backup(self):
+        d = self.mk("a")
+        meeting_store.add_annotation(d, "note", 1, "甲")
+        meeting_store.add_annotation(d, "note", 2, "乙")
+        self.assertEqual(self._backups(d), [])
+
+    def test_two_successive_corruptions_keep_two_distinct_backups(self):
+        d = self.mk("a")
+        (d / "annotations.json").write_text("{first", encoding="utf-8")
+        meeting_store.add_annotation(d, "note", 1, "甲")
+        (d / "annotations.json").write_text("[1, 2,", encoding="utf-8")
+        meeting_store.add_annotation(d, "note", 2, "乙")
+        backups = self._backups(d)
+        self.assertEqual(len(backups), 2)
+        self.assertEqual(sorted(b.read_text(encoding="utf-8") for b in backups), ["[1, 2,", "{first"])
+
+    def test_same_timestamp_never_overwrites_backup(self):
+        d = self.mk("a")
+        with mock.patch("common.datetime") as dt:
+            dt.now.return_value = datetime(2026, 11, 9, 10, 0, 0, 0)
+            for i in range(3):
+                (d / "annotations.json").write_text("坏%d{" % i, encoding="utf-8")
+                meeting_store.add_annotation(d, "note", i, "x")
+        self.assertEqual(sorted(b.read_text(encoding="utf-8") for b in self._backups(d)), ["坏0{", "坏1{", "坏2{"])
+
+    def test_backup_failure_aborts_write_and_keeps_original(self):
+        d = self.mk("a")
+        (d / "annotations.json").write_text("{oops", encoding="utf-8")
+        with mock.patch("common.shutil.copyfile", side_effect=OSError("磁盘满")):
+            with self.assertRaises(common.DataProtectionError) as cm:
+                meeting_store.add_annotation(d, "note", 1, "新")
+        self.assertIn("备份", str(cm.exception))
+        self.assertEqual((d / "annotations.json").read_text(encoding="utf-8"), "{oops")
+        self.assertEqual(self._backups(d), [])
 
     def test_malformed_items_skipped(self):
         d = self.mk("a")

@@ -40,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import common
 import interview_questions
 import interview_store
 import llm_client
@@ -388,6 +389,12 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
     @app.exception_handler(llm_client.LLMError)
     async def _llm_error(_req, exc):
         return _error(502, exc.message)
+
+    @app.exception_handler(common.DataProtectionError)
+    async def _data_protection(_req, exc):
+        # 无法为将被改写的原件留档：写入已中止、原文件原样保留；消息是中文，可直接展示
+        log.error("数据保护：%s", exc)
+        return _error(500, str(exc))
 
     @app.exception_handler(MeetingStartError)
     async def _start_error(_req, exc):

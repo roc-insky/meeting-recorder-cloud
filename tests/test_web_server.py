@@ -504,6 +504,25 @@ class AnnotationTests(AppCase):
                 self.assertIn("error", r.json())
         self.assertEqual(meeting_store.list_annotations(self.root / MID), [])
 
+    def test_backup_failure_returns_chinese_error_and_keeps_original(self):
+        self.make_meeting()
+        path = self.root / MID / "annotations.json"
+        path.write_text("{oops", encoding="utf-8")
+        with mock.patch("common.shutil.copyfile", side_effect=OSError("磁盘满")):
+            r = self.mut("POST", f"/api/meetings/{MID}/annotations", json={"kind": "note", "t": 1, "text": "x"})
+        self.assertEqual(r.status_code, 500)
+        self.assertIn("备份", r.json()["error"])
+        self.assertEqual(path.read_text(encoding="utf-8"), "{oops")
+
+    def test_corrupt_annotations_backed_up_on_post(self):
+        self.make_meeting()
+        path = self.root / MID / "annotations.json"
+        path.write_text('{"wrong": "shape"}', encoding="utf-8")
+        r = self.mut("POST", f"/api/meetings/{MID}/annotations", json={"kind": "note", "t": 1, "text": "x"})
+        self.assertEqual(r.status_code, 201)
+        backups = list((self.root / MID).glob("annotations.json.*.corrupt"))
+        self.assertEqual([b.read_text(encoding="utf-8") for b in backups], ['{"wrong": "shape"}'])
+
 
 class VoiceprintRouteTests(AppCase):
     def save(self, name):
