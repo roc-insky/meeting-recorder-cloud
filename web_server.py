@@ -1,20 +1,28 @@
 """Web 控制台后端：FastAPI 应用（仅限本机访问）。
 
-装配：create_app(controller, root=, config_path=, voiceprint_service=) 内部会调用
+装配：create_app(controller, root=, config_path=, voiceprint_service=, port=None, llm_opener=None, job_store=None) 内部会调用
 meeting_controller.link_exclusive(controller, voiceprint_service)（幂等，只是重新设置互斥回调），
 所以调用方不必再自己连一次；应用关闭（lifespan 结束）时会先唤醒所有 SSE 连接，
 再 controller.close() 与 voiceprint_service.close()。
 
 安全守卫（全部在 GuardMiddleware 里，纯 ASGI 实现）：
   - 所有请求：Host 必须是 127.0.0.1 或 localhost（可带服务端口），防 DNS rebinding；
-  - POST/PATCH/DELETE：必须带 Origin，且为 http://127.0.0.1:端口 或 http://localhost:端口，否则 403；
+  - POST/PUT/PATCH/DELETE：必须带 Origin，且为 http://127.0.0.1:端口 或 http://localhost:端口，否则 403；
   - 带请求体时 Content-Type 必须是 application/json（415），体积 ≤ 64KB（413）；
+    只有 POST /api/jobs/{id}/questions（可带简历图片）放宽到 QUESTIONS_BODY_BYTES；
   - 不开启 CORS；/ 和 /static/* 带 Cache-Control: no-cache，/api/* 带 no-store。
+
+大模型功能（Task 8）：llm_opener 仅供测试注入假 opener（缺省真实、不跟随重定向）；
+job_store 缺省为 JobStore(config_path 所在目录/jobs.json)——职位库与会议目录分开，不放进 root。
+简历文字与生成的面试题只经过内存，不落盘。大模型错误 → 502（固定中文消息，不含服务器原文/Key），
+未配置 [llm] → 503，发言超过 max_input_chars → 413，简历/图片不合规 → 422。
 
 错误统一为 {"error": "中文消息"}：Busy→409，找不到→404，ValueError/校验错误→400，
 录音没能开始→503，其余未预期异常→500（只回通用消息，详情进服务端日志）。
 """
 import asyncio
+import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -32,7 +40,11 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import interview_questions
+import interview_store
+import llm_client
 import meeting_store
+import meeting_summary
 import voiceprint
 import web_config
 from meeting_controller import Busy, MeetingStartError, link_exclusive
@@ -43,7 +55,13 @@ log = logging.getLogger("web_server")
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 MAX_BODY_BYTES = 64 * 1024
-MUTATING_METHODS = frozenset({"POST", "PATCH", "DELETE"})
+QUESTIONS_BODY_BYTES = 40 * 1024 * 1024   # 5 张 ≤5MB 的图片经 base64 后的上限（含简历文字余量）
+_QUESTIONS_PATH = re.compile(r"^/api/jobs/[^/]+/questions$")
+MAX_RESUME_CHARS = 20000
+MAX_IMAGES = 5
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_IMAGE_URI = re.compile(r"^data:image/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]*={0,2})$")
+MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 HEARTBEAT_S = 15.0          # SSE 空闲多久发一次注释心跳
 TICK_S = 0.25               # subscribe 每隔多久回来检查一次断开/关闭
 LEVEL_INTERVAL_S = 0.25     # level 事件最短间隔（约 4 次/秒）
@@ -89,15 +107,17 @@ class GuardMiddleware:
             if len(origins) != 1 or origins[0].lower() not in self._origins:
                 await _error(403, "来源不被允许")(scope, receive, send)
                 return
-            rejection, receive = await self._check_body(headers, receive)
+            limit = QUESTIONS_BODY_BYTES if (scope["method"] == "POST" and _QUESTIONS_PATH.match(scope["path"])) \
+                else MAX_BODY_BYTES
+            rejection, receive = await self._check_body(headers, receive, limit)
             if rejection is not None:
                 await rejection(scope, receive, send)
                 return
         await self.app(scope, receive, self._with_cache_headers(scope["path"], send))
 
     @staticmethod
-    async def _check_body(headers, receive):
-        """有请求体时检查 Content-Type 与体积；返回 (拒绝响应或 None, 可能被替换的 receive)。"""
+    async def _check_body(headers, receive, limit: int = MAX_BODY_BYTES):
+        """有请求体时检查 Content-Type 与体积（上限 limit）；返回 (拒绝响应或 None, 可能被替换的 receive)。"""
         length = headers.get("content-length")
         chunked = "transfer-encoding" in headers
         if length is not None:
@@ -109,7 +129,7 @@ class GuardMiddleware:
         ctype = headers.get("content-type", "").split(";")[0].strip().lower()
         if ctype != "application/json":
             return _error(415, "请求内容必须是 application/json"), receive
-        if length is not None and length > MAX_BODY_BYTES:
+        if length is not None and length > limit:
             return _error(413, "请求内容太大"), receive
         body = bytearray()
         while True:
@@ -117,7 +137,7 @@ class GuardMiddleware:
             if message["type"] == "http.disconnect":
                 return _error(400, "连接已断开"), receive
             body += message.get("body", b"")
-            if len(body) > MAX_BODY_BYTES:
+            if len(body) > limit:
                 return _error(413, "请求内容太大"), receive
             if not message.get("more_body", False):
                 break
@@ -291,9 +311,39 @@ def _read_text(meeting_dir: Path, name: str):
 
 
 # ---------- 应用 ----------
-def create_app(controller, *, root, config_path, voiceprint_service, port: int | None = None) -> FastAPI:
-    """组装 FastAPI 应用；port 缺省取 config.toml 的 [web] port（默认 8765）。"""
+def _check_images(images) -> list:
+    """校验简历图片：≤5 张，data:image/(png|jpeg|webp|gif);base64,，合法 base64，解码后 ≤5MB；否则 422。"""
+    if images is None:
+        return []
+    if not isinstance(images, list):
+        raise ApiError(422, "images 必须是图片列表")
+    if len(images) > MAX_IMAGES:
+        raise ApiError(422, f"最多上传 {MAX_IMAGES} 张图片")
+    max_b64 = (MAX_IMAGE_BYTES + 2) // 3 * 4
+    for img in images:
+        m = _IMAGE_URI.match(img) if isinstance(img, str) else None
+        if not m or not m.group(1):
+            raise ApiError(422, "图片格式不对，只支持 png、jpeg、webp、gif")
+        if len(m.group(1)) > max_b64:
+            raise ApiError(422, "单张图片不能超过 5MB")
+        try:
+            size = len(base64.b64decode(m.group(1), validate=True))
+        except (binascii.Error, ValueError):
+            raise ApiError(422, "图片编码无效") from None
+        if size > MAX_IMAGE_BYTES:
+            raise ApiError(422, "单张图片不能超过 5MB")
+    return images
+
+
+def create_app(controller, *, root, config_path, voiceprint_service, port: int | None = None,
+               llm_opener=None, job_store=None) -> FastAPI:
+    """组装 FastAPI 应用；port 缺省取 config.toml 的 [web] port（默认 8765）。
+
+    llm_opener：测试用假 opener（缺省真实 opener）；job_store：职位库，缺省 config_path 同目录的 jobs.json。
+    """
     root = Path(root)
+    if job_store is None:
+        job_store = interview_store.JobStore(Path(config_path).parent / "jobs.json")
     port = port if port is not None else web_config.load_port(config_path)
     link_exclusive(controller, voiceprint_service)
     sse_stops: set = set()
@@ -330,6 +380,14 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
     @app.exception_handler(JobNotFound)
     async def _no_job(_req, _exc):
         return _error(404, "任务不存在")
+
+    @app.exception_handler(interview_store.JobNotFound)
+    async def _no_position(_req, _exc):
+        return _error(404, "职位不存在")
+
+    @app.exception_handler(llm_client.LLMError)
+    async def _llm_error(_req, exc):
+        return _error(502, exc.message)
 
     @app.exception_handler(MeetingStartError)
     async def _start_error(_req, exc):
@@ -452,6 +510,76 @@ def create_app(controller, *, root, config_path, voiceprint_service, port: int |
             raise ApiError(400, f"缺少字段：{'、'.join(missing)}")
         d = meeting_dir(meeting_id)                  # 录音中也允许加标注
         return meeting_store.add_annotation(d, body["kind"], body["t"], body["text"])
+
+    # ---- 发言归纳 ----
+    def llm_config() -> dict:
+        cfg = web_config.load_llm(config_path)
+        if cfg is None:
+            raise ApiError(503, "未配置大模型，请在 config.toml 的 [llm] 填写 base_url、api_key、model")
+        return cfg
+
+    @app.get("/api/meetings/{meeting_id}/speakers")
+    def meeting_speakers(meeting_id: str):
+        d = meeting_dir(meeting_id)
+        return {"speakers": meeting_summary.list_speakers(_read_text(d, "transcript.md") or "")}
+
+    @app.post("/api/meetings/{meeting_id}/summary")
+    def meeting_summarize(meeting_id: str, body: dict = Depends(optional_body)):
+        _check_keys(body, ("speakers",))
+        d = meeting_dir(meeting_id)
+        cfg = llm_config()
+        speakers = body.get("speakers")
+        if speakers is not None:
+            if (not isinstance(speakers, list) or not speakers
+                    or not all(isinstance(s, str) for s in speakers)):
+                raise ApiError(400, "speakers 必须是非空的说话人名列表")
+        transcript = _read_text(d, "transcript.md")
+        if transcript is None:
+            raise ApiError(404, "该会议还没有文字稿")
+        sections = meeting_summary.speech_sections(transcript, speakers)   # 说话人不在文字稿里 → ValueError → 400
+        if not sections:
+            raise ApiError(400, "没有可归纳的发言")
+        if meeting_summary.total_chars(sections) > cfg["max_input_chars"]:
+            raise ApiError(413, f"发言超过 {cfg['max_input_chars']} 字，请减少说话人后再试")
+        system, user = meeting_summary.build_summary_prompt(transcript, speakers)
+        return {"summary": llm_client.chat_summary(cfg, system, user, opener=llm_opener)}
+
+    # ---- 面试职位与问题 ----
+    @app.get("/api/jobs")
+    def jobs_list():
+        return {"jobs": job_store.list()}
+
+    @app.post("/api/jobs", status_code=201)
+    def jobs_create(body: dict = Depends(required_body)):
+        _check_keys(body, ("type", "title", "requirements"))
+        return job_store.create(body.get("type"), body.get("title"), body.get("requirements", ""))
+
+    @app.put("/api/jobs/{job_id}")
+    def jobs_update(job_id: str, body: dict = Depends(required_body)):
+        _check_keys(body, ("type", "title", "requirements"))
+        return job_store.update(job_id, body.get("type"), body.get("title"), body.get("requirements", ""))
+
+    @app.delete("/api/jobs/{job_id}")
+    def jobs_delete(job_id: str):
+        job_store.delete(job_id)
+        return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/questions")
+    def jobs_questions(job_id: str, body: dict = Depends(optional_body)):
+        _check_keys(body, ("resume_text", "images"))
+        job = job_store.get(job_id)
+        resume = body.get("resume_text", "")
+        if not isinstance(resume, str):
+            raise ApiError(422, "简历文字必须是文字")
+        if len(resume) > MAX_RESUME_CHARS:
+            raise ApiError(422, f"简历文字不能超过 {MAX_RESUME_CHARS} 个字")
+        images = _check_images(body.get("images"))
+        cfg = llm_config()
+        if images:        # 先让多模态模型把图片转写成文字，再和粘贴的文字一起出题（两次调用；都不落盘）
+            from_images = llm_client.describe_images(cfg, images, opener=llm_opener)
+            resume = (resume.strip() + "\n\n" if resume.strip() else "") + from_images
+        system, user = interview_questions.build_prompt(job, resume)
+        return {"questions": llm_client.chat_summary(cfg, system, user, opener=llm_opener)}
 
     # ---- 声纹 ----
     @app.get("/api/voiceprints")
