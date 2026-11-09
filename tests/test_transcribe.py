@@ -137,6 +137,33 @@ class TranscribeWavTest(unittest.TestCase):
         )
         self.assertIn("（未识别到语音）", out)
 
+    def test_malformed_wav_is_a_failure_not_empty(self):
+        for name, raw in (("garbage", b"not a wav, just junk bytes!!"), ("truncated", b"RIFF\x00\x00\x00\x00WAVEfmt ")):
+            wav = self.dir / f"{name}.wav"
+            wav.write_bytes(raw)
+            with self.subTest(name), self.assertRaises(common.MalformedAudioError):
+                transcribe.transcribe_wav(
+                    wav, model="m", speakers=None, diarize=False, deps={"transcribe_fn": must_not_call}
+                )
+
+    def test_main_malformed_wav_fails_and_keeps_existing_transcript(self):
+        wav = self.dir / "meeting.wav"
+        wav.write_bytes(b"garbage garbage garbage garbage")
+        transcript = self.dir / "transcript.md"
+        transcript.write_text("# 会议文字稿\n\n[00:00:01] 很珍贵的旧文字稿\n", encoding="utf-8")
+        err = io.StringIO()
+        code = transcribe.main([str(self.dir), "--no-diarize"], deps={"transcribe_fn": must_not_call, "stderr": err})
+        self.assertNotEqual(code, 0)
+        self.assertIn("损坏", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual(transcript.read_text(encoding="utf-8"), "# 会议文字稿\n\n[00:00:01] 很珍贵的旧文字稿\n")
+
+    def test_main_genuinely_empty_wav_still_writes_empty_note(self):
+        write_wav(self.dir / "meeting.wav", np.zeros(0, dtype=np.int16))
+        code = transcribe.main([str(self.dir), "--no-diarize"], deps={"transcribe_fn": must_not_call})
+        self.assertEqual(code, 0)
+        self.assertIn("（未识别到语音）", (self.dir / "transcript.md").read_text(encoding="utf-8"))
+
     def test_silent_wav_no_model_call(self):
         wav = self.dir / "meeting.wav"
         write_wav(wav, np.zeros(16000, dtype=np.int16))

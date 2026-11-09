@@ -177,9 +177,9 @@ def transcribe_wav(
 
     try:
         rate, samples = common.read_wav_tolerant(wav)
-    except ValueError as e:
-        if "为空或损坏" not in str(e):
-            raise
+    except common.EmptyAudioError:
+        # 仅“确实没有样本”才算没有语音；损坏的 wav（MalformedAudioError）继续向上抛，
+        # 由调用方当作失败处理，绝不能用空文字稿覆盖已有的文字稿
         return render([], started=started or _guess_start(wav, 0.0), duration=0.0)
 
     duration = samples.size / rate

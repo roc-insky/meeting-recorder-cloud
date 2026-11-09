@@ -1,4 +1,5 @@
 """meeting_controller 的单元测试（假 record_fn / transcribe_fn / 时钟，不碰麦克风、模型和真实目录）。"""
+import io
 import tempfile
 import threading
 import unittest
@@ -589,6 +590,40 @@ class RealWiringTests(unittest.TestCase):
             mdir = root / mid
             self.assertIn("你好", (mdir / "transcript.md").read_text(encoding="utf-8"))
             self.assertTrue((mdir / "meeting.m4a").exists())
+
+    def test_malformed_wav_final_failed_and_transcript_kept(self):
+        """损坏的 wav 不是“没有语音”：final=failed，且已有的 transcript.md 原样保留。"""
+        import subprocess
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "Meetings"
+            mdir = root / "2026-11-09_1030"
+
+            def rec_fn(out_root, *, stop, on_started, on_level, on_samples):
+                mdir.mkdir(parents=True)
+                (mdir / "meeting.wav").write_bytes(b"garbage garbage garbage garbage")
+                (mdir / "transcript.md").write_text("旧文字稿", encoding="utf-8")
+                on_started(mdir)
+                stop.wait(WAIT)
+                return mdir
+
+            def fake_run(args, **kw):
+                return subprocess.CompletedProcess(args, 1, b"", b"")
+
+            tr_fn = meeting_controller.make_transcribe_fn(run=fake_run, deps={"stderr": io.StringIO()})
+            ctl = MeetingController(root, record_fn=rec_fn, transcribe_fn=tr_fn, clock=FakeClock())
+            self.addCleanup(ctl.close)
+            ctl.start()
+            ctl.stop()
+            stop = threading.Event()
+            for ev in ctl.subscribe(0, stop, WAIT):
+                if ev is None or ev["type"] == "final":
+                    break
+            snap = ctl.snapshot()
+            self.assertEqual(snap["final"], "failed", snap)
+            self.assertIn("损坏", snap["error"] or "")
+            self.assertEqual((mdir / "transcript.md").read_text(encoding="utf-8"), "旧文字稿")
 
 
 if __name__ == "__main__":

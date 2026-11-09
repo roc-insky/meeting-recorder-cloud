@@ -99,9 +99,62 @@ class CommonTest(unittest.TestCase):
         p = self.tmp / "e.wav"
         p.write_bytes(make_wav_bytes(b"", data_len_field=0))
         self.assertEqual(p.stat().st_size, 44)
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(common.EmptyAudioError) as cm:
             common.read_wav_tolerant(p)
-        self.assertEqual(str(cm.exception), "录音文件为空或损坏")
+        self.assertEqual(str(cm.exception), "录音文件为空（没有音频样本）")
+        self.assertNotIsInstance(cm.exception, common.MalformedAudioError)
+
+    def test_read_wav_zero_frames_with_real_data_chunk_is_empty(self):
+        p = self.tmp / "e2.wav"
+        p.write_bytes(make_wav_bytes(b""))   # 头里 data 长度也是 0，文件刚好 44 字节
+        with self.assertRaises(common.EmptyAudioError):
+            common.read_wav_tolerant(p)
+
+    def _assert_malformed(self, raw: bytes):
+        p = self.tmp / "bad.wav"
+        p.write_bytes(raw)
+        with self.assertRaises(common.MalformedAudioError) as cm:
+            common.read_wav_tolerant(p)
+        self.assertNotIsInstance(cm.exception, common.EmptyAudioError)
+        self.assertIn("损坏", str(cm.exception))
+        # 两种异常都仍是 ValueError 子类，旧的 except ValueError 调用方不受影响
+        self.assertIsInstance(cm.exception, ValueError)
+
+    def test_read_wav_garbage_is_malformed(self):
+        self._assert_malformed(b"this is not a wav file at all, just garbage bytes")
+
+    def test_read_wav_zero_byte_file_is_malformed(self):
+        self._assert_malformed(b"")
+
+    def test_read_wav_truncated_header_is_malformed(self):
+        good = make_wav_bytes(b"\x01\x00" * 100)
+        self._assert_malformed(good[:20])      # 只剩 RIFF 头与半个 fmt 块
+        self._assert_malformed(good[:12])      # 只有 RIFF/WAVE 标志
+
+    def test_read_wav_missing_data_chunk_is_malformed(self):
+        good = make_wav_bytes(b"\x01\x00" * 100)
+        self._assert_malformed(good[:36])      # fmt 完整但没有 data 块
+
+    def test_read_wav_missing_fmt_chunk_is_malformed(self):
+        raw = b"RIFF" + struct.pack("<I", 4 + 8 + 4) + b"WAVE" + b"data" + struct.pack("<I", 4) + b"\x01\x00\x02\x00"
+        self._assert_malformed(raw)
+
+    def test_read_wav_wrong_chunk_size_is_malformed(self):
+        # 在 fmt 与 data 之间塞一个声称很大的未知块，data 被它吞掉
+        fmt = struct.pack("<HHIIHH", 1, 1, 16000, 32000, 2, 16)
+        raw = (b"RIFF" + struct.pack("<I", 100) + b"WAVE"
+               + b"fmt " + struct.pack("<I", 16) + fmt
+               + b"junk" + struct.pack("<I", 0x7FFFFFFF)
+               + b"data" + struct.pack("<I", 4) + b"\x01\x00\x02\x00")
+        self._assert_malformed(raw)
+
+    def test_read_wav_bad_format_fields_are_malformed(self):
+        for channels, rate in ((0, 16000), (1, 0)):
+            fmt = struct.pack("<HHIIHH", 1, channels, rate, 32000, 2, 16)
+            raw = (b"RIFF" + struct.pack("<I", 40) + b"WAVE"
+                   + b"fmt " + struct.pack("<I", 16) + fmt
+                   + b"data" + struct.pack("<I", 4) + b"\x01\x00\x02\x00")
+            self._assert_malformed(raw)
 
     def test_read_wav_normal(self):
         p = self.tmp / "n.wav"
