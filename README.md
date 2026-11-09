@@ -30,7 +30,13 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ## 目录说明
 
 - `common.py`：公共常量与工具函数。
+- `record.py`：录音（边录边落盘）、m4a 压缩、转写；`--live` 暂未实现。退出码：0 成功，1 录音失败，2 录音已保存但转写失败。
+- `transcribe.py`：转写核心与文字稿渲染。
 - `tools/`：离线评估工具。
 - `tests/`：单元测试。
 - `spike/`：可行性验证脚本。
 - `docs/`：设计与计划文档。
+
+## 验收记录
+
+- Task 3 真实麦克风冒烟：未测
