@@ -136,6 +136,7 @@ class JoinTextsTest(unittest.TestCase):
         self.assertEqual(live.join_texts(["OK", "你好"]), "OK你好")
         self.assertEqual(live.join_texts(["好，", "ok"]), "好，ok")
         self.assertEqual(live.join_texts([]), "")
+        self.assertEqual(live.join_texts(["", "hello", "", "world", ""]), "hello world")
 
     def test_transcriber_joins_chinese_segments_without_space(self):
         sink = RecordingSink()

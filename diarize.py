@@ -41,12 +41,29 @@ _DOWNLOAD_CHUNK = 1 << 20
 
 
 def _default_download(url: str, dest: Path) -> None:
-    """真实下载：urllib 分块写到 dest（调用方传入 .part 路径）；下载为空文件则抛 OSError。"""
+    """真实下载：urllib 分块写到 dest（调用方传入 .part 路径）。
+
+    下载为空，或响应带 Content-Length 而实际字节数不足时抛 OSError（调用方负责清理 .part）。
+    """
+    written = 0
     with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_S) as resp, open(dest, "wb") as out:
+        expected = _expected_length(resp)
         while chunk := resp.read(_DOWNLOAD_CHUNK):
             out.write(chunk)
-    if dest.stat().st_size == 0:
+            written += len(chunk)
+    if written == 0:
         raise OSError("下载内容为空")
+    if expected is not None and written < expected:
+        raise OSError(f"下载不完整：期望 {expected} 字节，实际 {written} 字节")
+
+
+def _expected_length(resp):
+    """读响应的 Content-Length；缺失或不是非负整数时返回 None（不做长度校验）。"""
+    try:
+        value = int(resp.headers.get("Content-Length"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def _discard(path: Path) -> None:

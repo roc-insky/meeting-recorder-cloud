@@ -85,6 +85,8 @@ def join_texts(texts) -> str:
     """拼接同一句的多个片段：任一侧边界字符是中日韩字符或全角标点就不加空格，否则加一个空格。"""
     out = ""
     for t in texts:
+        if not t:
+            continue
         if out and not (_is_cjk(out[-1]) or _is_cjk(t[0])):
             out += " "
         out += t

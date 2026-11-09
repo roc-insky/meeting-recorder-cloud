@@ -172,8 +172,9 @@ class DefaultDownloadTest(unittest.TestCase):
     """_default_download：用假 urlopen，不联网。"""
 
     class FakeResp:
-        def __init__(self, data):
+        def __init__(self, data, headers=None):
             self._buf = io.BytesIO(data)
+            self.headers = headers if headers is not None else {}
 
         def read(self, n=-1):
             return self._buf.read(n)
@@ -204,6 +205,40 @@ class DefaultDownloadTest(unittest.TestCase):
                 mock.patch.object(diarize.urllib.request, "urlopen", lambda url, timeout=None: self.FakeResp(b"")):
             with self.assertRaises(OSError):
                 diarize._default_download("http://example/x", Path(d) / "x.part")
+
+    def test_truncated_download_raises(self):
+        resp = lambda url, timeout=None: self.FakeResp(b"x" * 100, {"Content-Length": "1000"})
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(diarize.urllib.request, "urlopen", resp):
+            with self.assertRaises(OSError) as cm:
+                diarize._default_download("http://example/x", Path(d) / "x.part")
+            self.assertIn("下载不完整", str(cm.exception))
+
+    def test_truncated_download_leaves_no_residue_in_ensure_paths(self):
+        import live
+
+        resp = lambda url, timeout=None: self.FakeResp(b"x" * 100, {"Content-Length": "1000"})
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(diarize.urllib.request, "urlopen", resp):
+            d = Path(d)
+            with self.assertRaises(OSError):
+                diarize.ensure_models(d)
+            self.assertFalse(list(d.rglob("*.onnx")))
+            self.assertFalse(list(d.rglob("*.part")))
+            with self.assertRaises(OSError):
+                live.ensure_vad_model(d / "vad")
+            self.assertEqual(list((d / "vad").iterdir()), [])
+
+    def test_missing_or_invalid_content_length_accepted(self):
+        for headers in ({}, {"Content-Length": "abc"}, {"Content-Length": "-5"}):
+            resp = lambda url, timeout=None, h=headers: self.FakeResp(b"y" * 50, h)
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(diarize.urllib.request, "urlopen", resp):
+                dest = Path(d) / "x.part"
+                diarize._default_download("http://example/x", dest)
+                self.assertEqual(dest.stat().st_size, 50, headers)
+
+    def test_matching_content_length_accepted(self):
+        resp = lambda url, timeout=None: self.FakeResp(b"z" * 50, {"Content-Length": "50"})
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(diarize.urllib.request, "urlopen", resp):
+            diarize._default_download("http://example/x", Path(d) / "x.part")
 
     def test_empty_download_via_ensure_leaves_no_part_or_target(self):
         with tempfile.TemporaryDirectory() as d, \
