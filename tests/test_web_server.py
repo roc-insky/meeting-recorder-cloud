@@ -259,7 +259,7 @@ class StaticTests(AppCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("text/html", r.headers["content-type"])
         self.assertIn("no-cache", r.headers["cache-control"])
-        self.assertIn("前端待 Task 9", r.text)
+        self.assertIn("id=\"tab-meeting\"", r.text)
 
     def test_static_no_cache(self):
         r = self.client.get("/static/index.html")

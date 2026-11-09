@@ -2,9 +2,199 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>会议录音</title>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<p>会议录音 — 前端待 Task 9</p>
+<header class="topbar">
+  <h1>会议录音</h1>
+  <div class="tabs" role="tablist" aria-label="功能页">
+    <button type="button" role="tab" id="tab-meeting" class="tab" aria-selected="true" aria-controls="view-meeting">当前会议</button>
+    <button type="button" role="tab" id="tab-interview" class="tab" aria-selected="false" aria-controls="view-interview" tabindex="-1">面试帮助</button>
+    <button type="button" role="tab" id="tab-voiceprint" class="tab" aria-selected="false" aria-controls="view-voiceprint" tabindex="-1">声纹登记</button>
+  </div>
+  <span id="conn" class="status-pill conn-off" role="status">连接中…</span>
+</header>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<main>
+<section id="view-meeting" class="view" role="tabpanel" aria-labelledby="tab-meeting">
+  <div class="columns">
+    <aside class="col col-history" id="col-history" aria-label="历史会议">
+      <div class="col-head">
+        <h2>历史会议</h2>
+        <button type="button" id="history-refresh">刷新</button>
+      </div>
+      <ul id="history-list" class="history-list"></ul>
+      <p id="history-empty" class="hint" hidden>还没有会议记录</p>
+    </aside>
+
+    <section class="col col-main" id="col-main" aria-label="录音与转写">
+      <div class="controls">
+        <div class="control-row">
+          <label for="speakers">当前会议人数</label>
+          <input id="speakers" type="number" min="1" max="20" step="1" inputmode="numeric" placeholder="自动">
+          <label class="check"><input id="live-toggle" type="checkbox"> 实时转写</label>
+          <button type="button" id="btn-start" class="primary">开始录音</button>
+          <button type="button" id="btn-stop" class="danger" disabled>停止录音</button>
+        </div>
+        <div class="control-row">
+          <span id="timer" class="timer" aria-label="已录时长">00:00:00</span>
+          <span id="rec-state" class="status-pill rec-idle">空闲</span>
+          <span id="final-status" class="status-pill final-idle">空闲</span>
+          <div class="level" role="presentation"><div id="level-bar" class="level-bar"></div></div>
+        </div>
+        <p id="final-note" class="note" role="status" hidden></p>
+      </div>
+      <h2 id="transcript-title" class="transcript-title">转写</h2>
+      <div id="transcript" class="transcript" role="log" aria-label="转写内容"></div>
+      <p id="transcript-empty" class="hint">选择左侧的会议，或开始一场新录音</p>
+    </section>
+
+    <aside class="col col-side" id="col-side" aria-label="标注与发言归纳">
+      <section class="panel" aria-labelledby="ann-heading">
+        <h2 id="ann-heading">标注</h2>
+        <form id="ann-form" autocomplete="off">
+          <fieldset class="kinds">
+            <legend>类型</legend>
+            <div id="ann-kinds" class="kind-list"></div>
+          </fieldset>
+          <div class="field">
+            <label for="ann-time">时间（秒）</label>
+            <div class="inline">
+              <input id="ann-time" type="number" min="0" step="any" inputmode="decimal" placeholder="点击转写行可自动填入">
+              <button type="button" id="ann-now">当前</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="ann-text">内容</label>
+            <textarea id="ann-text" rows="3" maxlength="2000"></textarea>
+          </div>
+          <button type="submit" id="ann-submit" class="primary">添加标注</button>
+        </form>
+        <ul id="ann-list" class="ann-list"></ul>
+        <p id="ann-empty" class="hint">暂无标注</p>
+      </section>
+
+      <section class="panel" aria-labelledby="summary-heading">
+        <h2 id="summary-heading">发言归纳</h2>
+        <div class="field">
+          <label for="summary-speaker">说话人</label>
+          <select id="summary-speaker"></select>
+        </div>
+        <details id="summary-advanced">
+          <summary>高级：多选说话人</summary>
+          <div id="summary-multi" class="multi"></div>
+          <p class="hint">勾选后以勾选的说话人为准，忽略上面的下拉选择。</p>
+        </details>
+        <button type="button" id="summary-submit" class="primary">生成纪要</button>
+        <p id="summary-prompt" class="hint" role="status">选择有文字稿的会议后可生成纪要（需在 config.toml 配置 [llm]）。</p>
+        <div id="summary-result" class="result" aria-live="polite"></div>
+      </section>
+    </aside>
+  </div>
+</section>
+
+<section id="view-interview" class="view" role="tabpanel" aria-labelledby="tab-interview" hidden>
+  <div class="columns interview-columns">
+    <aside class="col col-history" aria-label="职位列表">
+      <div class="col-head">
+        <h2>职位</h2>
+        <button type="button" id="job-new">新建</button>
+      </div>
+      <ul id="job-list" class="history-list"></ul>
+      <p id="job-empty" class="hint" hidden>还没有职位，请先新建</p>
+    </aside>
+    <section class="col col-main" aria-label="职位编辑与简历">
+      <form id="job-form" class="panel" autocomplete="off">
+        <h2 id="job-form-title">新建职位</h2>
+        <div class="field">
+          <label for="job-type">职位类型</label>
+          <select id="job-type"></select>
+        </div>
+        <div class="field">
+          <label for="job-title">职位名称</label>
+          <input id="job-title" type="text" maxlength="100">
+        </div>
+        <div class="field">
+          <label for="job-req">职位要求</label>
+          <textarea id="job-req" rows="6" maxlength="10000"></textarea>
+        </div>
+        <div class="control-row">
+          <button type="submit" id="job-save" class="primary">保存职位</button>
+          <button type="button" id="job-delete" class="danger" disabled>删除职位</button>
+        </div>
+      </form>
+      <section class="panel" aria-labelledby="resume-heading">
+        <h2 id="resume-heading">候选人简历</h2>
+        <p class="hint">简历与生成的面试题只在本次请求中使用，不会保存。</p>
+        <div class="field">
+          <label for="resume-text">简历文字（可在此处直接粘贴截图）</label>
+          <textarea id="resume-text" rows="8" maxlength="20000"></textarea>
+        </div>
+        <div class="field">
+          <label for="resume-file">或选择简历图片（最多 5 张，每张不超过 5MB）</label>
+          <input id="resume-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple>
+        </div>
+        <ul id="resume-images" class="thumbs"></ul>
+        <div class="control-row">
+          <button type="button" id="q-generate" class="primary" disabled>生成面试题</button>
+          <button type="button" id="resume-clear">清空简历</button>
+        </div>
+        <p id="q-status" class="hint" role="status">请先在左侧选择一个已保存的职位。</p>
+      </section>
+    </section>
+    <section class="col col-side" aria-label="面试题">
+      <section class="panel" aria-labelledby="q-heading">
+        <h2 id="q-heading">面试题</h2>
+        <div id="q-result" class="result md" aria-live="polite"></div>
+      </section>
+    </section>
+  </div>
+</section>
+
+<section id="view-voiceprint" class="view" role="tabpanel" aria-labelledby="tab-voiceprint" hidden>
+  <div class="vp-layout">
+    <form id="vp-form" class="panel" autocomplete="off">
+      <h2>登记声纹</h2>
+      <p class="hint">点击“现场录制”后，请按弹窗中的文案朗读约 30 秒；请在安静环境下进行。</p>
+      <div class="field">
+        <label for="vp-name">姓名</label>
+        <input id="vp-name" type="text" maxlength="20" required>
+      </div>
+      <label class="check"><input id="vp-replace" type="checkbox"> 明确替换同名声纹</label>
+      <div class="control-row">
+        <button type="submit" id="vp-start" class="primary">现场录制</button>
+      </div>
+      <p id="vp-message" class="note" role="status" hidden></p>
+    </form>
+    <section class="panel" aria-labelledby="vp-list-heading">
+      <div class="col-head">
+        <h2 id="vp-list-heading">已登记的声纹</h2>
+        <button type="button" id="vp-refresh">刷新</button>
+      </div>
+      <ul id="vp-list" class="history-list"></ul>
+      <p id="vp-empty" class="hint" hidden>还没有登记声纹</p>
+    </section>
+  </div>
+
+  <dialog id="voiceprint-dialog" aria-labelledby="vp-dialog-title">
+    <h2 id="vp-dialog-title">正在录制声纹</h2>
+    <p>请用平常的语速和音量，清晰地朗读下面这段话（可以重复朗读直到录制结束）：</p>
+    <blockquote class="script">今天天气很好，我正在为会议录音登记我的声音。我会用自然的语速，把这段话清楚地读出来。会议开始之前，先确认一下今天的议程，然后依次汇报各自负责的工作进展、遇到的问题，以及下一步的计划安排。如果有需要大家协助的地方，请及时提出来，我们一起讨论解决办法。谢谢大家。</blockquote>
+    <progress id="vp-progress" max="30" value="0" aria-label="录制进度"></progress>
+    <p id="vp-progress-text" class="hint" role="status">准备中…</p>
+    <div class="control-row">
+      <button type="button" id="vp-cancel" class="danger">取消录制</button>
+    </div>
+  </dialog>
+</section>
+</main>
+
+<script src="/static/marked.min.js"></script>
+<script src="/static/purify.min.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/interview.js"></script>
 </body>
 </html>
