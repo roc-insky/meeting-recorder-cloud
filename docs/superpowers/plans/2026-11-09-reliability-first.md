@@ -282,3 +282,24 @@
 - [ ] **Step 2: README 同步**：`config.toml` 示例加 `[voiceprint]`；自检页、补转写、「疑似」含义各一段，句子要短。
 - [ ] **Step 3: 全量测试** —— Expected: `OK`
 - [ ] **Step 4: 提交** —— `git add docs/plan/meeting-recorder-master-plan.md README.md docs/superpowers/plans/2026-11-09-reliability-first.md docs/superpowers/specs/2026-11-09-reliability-first-design.md docs/product/meeting-recorder-product-design.md`；`docs: 登记阶段 15 可信度优先`
+
+
+---
+
+## 执行结果（2026-11-09）
+
+- Task 1：作废（基线已实现 `common.read_wav_tolerant`、`atomic_write_text`，不重复做）。
+- Task 2：11ce704「feat: 声纹增加疑似标签与高低两个阈值」。
+- Task 3：c391115「feat: 声纹按聚类分档标注疑似并读取阈值配置」。
+- Task 4：99c6c64「feat: 文字稿表头记录声纹分数，发言归纳合并疑似与真名」。
+- Task 5：db480fa「feat: 新增 doctor.py 启动自检六项」。
+- Task 6：19bf9f9「feat: 大模型连接自检给出固定中文原因」。
+- Task 7：6504624「feat: 恢复中断的录音，补转写与重新转写」。
+- Task 8：ed45fe0「feat: 自检接口与页面，测试连接走 POST」。
+- Task 9：c6362fd、3aece19；本机（Mac mini M4）无麦克风输入通道，三种隔离模式均未测，只留结论：#2b 不做，需另立计划。
+- Task 10：`tools/eval_voiceprint.py` 与文档已实现。
+- Task 11：阻塞——需要真实标注会议数据，当前没有。
+- Task 12：本文档与 README、总计划已登记。
+
+验证：`.venv/bin/python -m unittest discover -s tests -t .` → 587 条全绿；`node --check web/static/app.js` 通过。
+未测：真实麦克风录音、模型下载、真实大模型调用、真实声纹登记、浏览器端到端。

@@ -54,10 +54,23 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 - 在 Chrome / Safari / Edge / Firefox 的较新版本打开 `http://127.0.0.1:8765/`（须用 `127.0.0.1` 或 `localhost`，其他主机名会被拒绝）；首次录音时 macOS 会请求麦克风权限。
 - 三个页面（标签页顺序固定）：
-  - **当前会议**：左栏历史会议（点标题查看，可编辑标题、删除，删除前会确认）；中栏计时与转写（可填“当前会议人数”1–20，可勾选实时转写；点击转写行可把时间填进标注框，带标注的行末有标记，点标记或右栏标注可互相定位）；右栏添加标注（📝笔记 / ⭐重点 / 💬注释）和“发言归纳”（选说话人，需配置 `[llm]`）。三栏在宽屏（≥1041px）下各自独立滚动。开始新录音会清掉上一场选中的行和转写残留。
+  - **当前会议**：左栏历史会议（点标题查看，可编辑标题、删除，删除前会确认；录音已保存但没有文字稿的会议会标“未完成”，可点“补转写”生成文字稿，已完成的会议可“重新转写”，旧稿会备份为 `transcript.md.bak`）；中栏计时与转写（可填“当前会议人数”1–20，可勾选实时转写；点击转写行可把时间填进标注框，带标注的行末有标记，点标记或右栏标注可互相定位）；右栏添加标注（📝笔记 / ⭐重点 / 💬注释）、“发言归纳”（选说话人，需配置 `[llm]`）和“自检”（见下）。三栏在宽屏（≥1041px）下各自独立滚动。开始新录音会清掉上一场选中的行和转写残留。
   - **面试帮助**：维护职位（前端 / 后端 / 客户端 / 测试），粘贴简历文字或截图（也可选择图片文件，最多 5 张、每张 ≤5MB），生成约 40 分钟的面试题；结果用 marked 渲染并经 DOMPurify 白名单净化后显示，简历与结果都不保存。
   - **声纹登记**：只需填写姓名；如要覆盖同名声纹须勾选“明确替换同名声纹”。点“现场录制”后弹出朗读文案，登记结束自动关闭；点“取消录制”、关闭弹窗或按 Esc 会取消本次录制。
 - 前端是原生 JS，无框架、无构建、无 CDN；所有文本经 `textContent` 写入，`innerHTML` 只出现在 `web/static/interview.js` 且只接受净化后的内容。
+
+### 声纹匹配与“疑似”
+
+- 声纹识别给每个说话人聚类打分：达到 `high` 写真实姓名，只达到 `low` 写“疑似姓名”，否则保留“说话人 N”。
+- 文字稿表头会多一行 `- 声纹匹配：<标签> <分数>`，方便核对打分；发言归纳会把“疑似X”并到 X，并单独标出哪些发言是疑似。
+
+### 自检
+
+右栏“自检”列出六项：麦克风、磁盘、模型缓存、大模型配置、声纹文件权限、残留音频线程。
+
+- 每项只有“正常 / 注意 / 故障”和一句固定中文说明，不显示路径、设备名或异常原文。
+- 点“测试连接”发一条最小的大模型请求，只回报固定原因（如“认证失败”“连接超时”），不显示地址和 Key。
+- 自检只读：不下载模型、不联网（“测试连接”除外）、不修改任何文件。
 
 ### 随仓库的第三方库
 
@@ -82,6 +95,10 @@ api_key = "sk-..."
 model = "模型名"
 timeout_s = 120            # 可选
 max_input_chars = 60000    # 可选
+
+[voiceprint]               # 可选；声纹相似度阈值，默认 high=0.5、low=0.35
+high = 0.5                 # 达到 high 写真实姓名
+low = 0.35                 # 达到 low 但不到 high 写“疑似姓名”
 ```
 
 ## Web 控制台后端
@@ -91,6 +108,7 @@ max_input_chars = 60000    # 可选
   - `GET /api/state`（状态快照 + `voiceprint_busy`）、`GET /api/events`（SSE，先发快照再发增量，支持 `Last-Event-ID` / `?last_seq=`）
   - `POST /api/recording/start`（`{speakers?, live?}`）、`POST /api/recording/stop`
   - `GET /api/meetings`、`GET|PATCH|DELETE /api/meetings/{id}`、`GET|POST /api/meetings/{id}/annotations`
+  - `POST /api/meetings/{id}/retranscribe`（`{force?}`；无稿补转写，`force` 重新转写并备份旧稿）、`GET /api/doctor`、`POST /api/doctor/llm-test`
   - `GET /api/voiceprints`、`DELETE /api/voiceprints/{name}`、`POST /api/voiceprints/jobs`、`GET /api/voiceprints/jobs/{job_id}`、`POST /api/voiceprints/jobs/{job_id}/cancel`
 - 变更类请求（POST/PUT/PATCH/DELETE）必须带 `Origin: http://127.0.0.1:端口`，JSON 体必须是 `application/json` 且不超过 64KB；录音/转写中的会议不能删除或改名（409）。
 - 按 Ctrl-C 退出时，打开着的 SSE 连接最多拖住 3 秒，随后停止录音并等待后台线程收尾。
@@ -118,7 +136,8 @@ max_input_chars = 60000    # 可选，默认 60000，发言超过则拒绝（413
 - `record.py`：录音（边录边落盘）、m4a 压缩、转写；`--live` 边录边转写（见下）。退出码：0 成功，1 录音失败，2 录音已保存但转写失败。
 - `live.py`：实时转写（Silero VAD 切句 + 后台逐句转写 + live.txt）。
 - `transcribe.py`：转写核心与文字稿渲染。
-- `tools/`：离线评估工具。
+- `tools/`：离线评估工具（`eval_voiceprint.py`：用标注好的样例算声纹准确率与各阈值误判率）。
+- `doctor.py`：启动自检的六项检查（只调用注入函数，不做 IO、不联网）。
 - `web.py` / `web_server.py`：Web 控制台入口与 FastAPI 应用；`web_config.py`、`meeting_store.py`、`meeting_controller.py`、`voiceprint_service.py` 为其后端模块。
 - `llm_client.py` / `meeting_summary.py` / `interview_store.py` / `interview_questions.py`：大模型调用、发言归纳、面试职位库与面试题提示词。
 - `web/static/`：前端静态文件（`index.html`、`style.css`、`app.js`、`interview.js`，以及随仓库的 `marked.min.js`、`purify.min.js`）。

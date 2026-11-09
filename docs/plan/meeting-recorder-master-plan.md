@@ -36,8 +36,9 @@ For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-develop
 | 10 | 2026-10-26 | 发言归纳（大模型） | 2026-10-26-speaker-summary.md | 已实现 |
 | 11 | 2026-10-28 | 开始录音重置界面、移除 initial_prompt、移除同意勾选 | 2026-10-28-recording-start-reset-and-drop-initial-prompt.md、2026-10-28-remove-voiceprint-consent-checkbox.md | 已完成 |
 | 12 | 2026-10-29 | 面试帮助 Tab（含 Markdown 渲染、缓存修复） | 2026-10-29-interview-helper-tab.md、2026-10-29-interview-markdown-render.md | 已实现 |
-| 13 | 2026-10-30 | 打开麦克风加超时 | 2026-10-30-open-microphone-timeout.md | 已实现（工作区未提交） |
-| 14 | 2026-11-01 | 面试问题 40 分钟 + 答案要点 | 2026-11-01-interview-40min-answer-points.md | 已实现（工作区未提交） |
+| 13 | 2026-10-30 | 打开麦克风加超时 | 2026-10-30-open-microphone-timeout.md | 已实现 |
+| 14 | 2026-11-01 | 面试问题 40 分钟 + 答案要点 | 2026-11-01-interview-40min-answer-points.md | 已实现 |
+| 15 | 2026-11-09 | 可信度优先 | 2026-11-09-reliability-first.md | 已实现（Task 11 待数据） |
 
 ### 当前累计约束（所有阶段合并后仍然有效）
 
@@ -60,7 +61,9 @@ For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-develop
 | record.py | `WavWriter`、音量条、静音警告、录音主循环（`open_stream` 带超时）、压缩 m4a、`--live` 接入、命令行。 |
 | diarize.py | 模型下载与缓存、sherpa-onnx 说话人区分。 |
 | live.py | VAD 模型下载、`Segmenter`、`LiveTranscriber`、`LiveSink`。 |
-| voiceprint.py / enroll.py | 声纹存取、登记算法、匹配 `label_turns` / 登记命令行。 |
+| voiceprint.py / enroll.py | 声纹存取、登记算法、两档阈值与 `label_turns_with_scores` / 登记命令行。 |
+| doctor.py | 启动自检六项（只调用注入函数，不做 IO、不联网）。 |
+| tools/eval_voiceprint.py | 离线声纹评估：用标注样例算准确率与各阈值误判率。 |
 | web.py / web_config.py / web_server.py | Web 启动与配置（`load_port`、`load_llm`）、FastAPI 路由与 SSE。 |
 | meeting_store.py / meeting_controller.py | 会议目录查找、标注/标题持久化与删除 / 单场录音生命周期、事件流。 |
 | voiceprint_service.py | Web 声纹登记任务（现场录制、导入、取消）。 |
@@ -460,6 +463,50 @@ FastAPI/Uvicorn 单进程持有一个录音控制器并托管静态页面；带�
 
 ---
 
+## 阶段 15 · 可信度优先（2026-11-09）
+
+详细记录：`docs/superpowers/plans/2026-11-09-reliability-first.md`；设计：`docs/superpowers/specs/2026-11-09-reliability-first-design.md`。
+
+### 目标
+
+从“能录、能转”提高到“结果可信、出错可控”：声纹分档且可核对、异常路径不丢数据、启动即可自检、中断的会议能补转写。
+
+### 设计
+
+- 声纹两档阈值：`config.toml` 的 `[voiceprint] high / low`（默认 0.5 / 0.35）；`>= high` 写真名，`>= low` 写“疑似名”，其余保留“说话人 N”。阈值非法（非数字、`0 < low < high <= 1` 不成立）整体回退默认值并打印中文警告。
+- 文字稿表头新增 `- 声纹匹配：<标签> <分数>` 行；发言归纳把“疑似X”并到 X，接口另给 `suspect_speakers` 标出哪些发言是疑似。
+- 自检 `doctor.run_checks` 六项：麦克风、磁盘、模型缓存、大模型配置、声纹文件权限、残留音频线程。全部只读、只给固定中文短句；`GET /api/doctor`、`POST /api/doctor/llm-test`（后者只回报固定原因，不显示地址和 Key）。
+- 中断恢复：`meeting_store.list_incomplete` 找出有录音无文字稿的会议，历史列表标“未完成”；`POST /api/meetings/{id}/retranscribe` 补转写，`force` 重新转写前把旧稿改名为 `transcript.md.bak`。
+- 最终审查的 10 个 MUST-FIX 全部落地：损坏 wav 不当空录音、实时转写初始化移到独立线程、保存/删除响应不串、标注/职位损坏先唯一备份、仅大小写不同的替换保持一致、声纹取消与保存提交点互斥、Ctrl-C 清理迟到流并返回 130、超大标注时间戳不溢出、声纹模型/维度不兼容时告警并跳过。
+
+### 约束
+
+- 新功能全部离线可测；真实麦克风、模型下载、真实大模型、真实声纹登记只记“未测”。
+- 自检绝不展示路径、设备名、Key 或异常原文；不自动下载模型、不改文件。
+- 声纹文件权限过宽只告警，不自动改权限。
+
+### 任务与状态
+
+| Task | 内容 | 状态 |
+|---|---|---|
+| 1 | 容错读取 wav | 作废（基线已实现，不重复做） |
+| 2 | 声纹“疑似”标签与两档阈值 | 已实现（11ce704） |
+| 3 | 按聚类最高分分配标签，同名冲突整个聚类跳过 | 已实现（c391115） |
+| 4 | 文字稿表头分数行、疑似合并与 `suspect_speakers` | 已实现（99c6c64） |
+| 5 | `doctor.py` 六项自检 | 已实现（db480fa） |
+| 6 | 大模型连接自检与固定中文原因 | 已实现（19bf9f9） |
+| 7 | 中断录音的补转写 / 重新转写 | 已实现（6504624） |
+| 8 | 自检接口与页面 | 已实现（ed45fe0） |
+| 9 | 麦克风隔离 spike | 已实现（c6362fd、3aece19）；本机无麦克风输入，三种模式均未测，#2b 不做 |
+| 10 | `tools/eval_voiceprint.py` 离线评估 | 已实现 |
+| 11 | 用真实标注数据校准阈值 | 阻塞：需真实数据 |
+| 12 | 登记本阶段、更新 README | 已实现 |
+
+**状态**：Task 1 作废、Task 11 待真实数据，其余全部实现；全量 587 条测试通过。
+
+---
+
 ## 变更记录（后续按 AGENTS.md 在此追加）
 
+- **2026-11-09**：阶段 15 可信度优先落地。新增 `doctor.py` 自检与 `GET /api/doctor`、`POST /api/doctor/llm-test`；`transcript.md` 表头新增 `- 声纹匹配：` 行，发言归纳接口新增 `suspect_speakers`；`config.toml` 新增 `[voiceprint] high / low`；新增 `POST /api/meetings/{id}/retranscribe` 与历史列表“未完成”标记；修复最终审查的 10 个 MUST-FIX。阶段 13/14 已提交。已知未完成：阶段 4 Task 8 阈值校准（由阶段 15 Task 11 承担，待真实数据）；“全部在本机运行”的隐私文案在启用 `[llm]` 后不严谨，待改；#2b 麦克风隔离待另立计划（本机无输入设备，spike 未测）。
 - **2026-11-08**：把 docs/superpowers/plans/ 下全部分阶段 plan 合并进本文件，新增总览、阶段索引、当前累计约束与文件结构；阶段 1 的 Task 标题加前缀以免与后续阶段混淆；阶段 1 之后各阶段按"目标 / 设计 / 约束 / Review Focus / 任务 / 状态"重写为摘要，逐步骤细节仍在原文件。已知未完成项见阶段索引：阶段 2 Task 5 真实会议评估、阶段 4 Task 8 声纹阈值校准、阶段 13/14 待提交。
