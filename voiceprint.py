@@ -62,11 +62,36 @@ def _unit(vector) -> np.ndarray:
     return v / norm
 
 
+def existing_profile_path(name: str):
+    """已登记的同名声纹文件（按大小写不敏感匹配，返回磁盘上的真实拼写）；没有返回 None。
+
+    macOS 默认文件系统不区分大小写：Bob 与 bob 会指向同一个文件，所以“是否已存在”必须忽略大小写，
+    并拿到真实拼写，替换时才能让文件名与里面的名字保持一致。
+    """
+    want = profile_path(name).name
+    try:
+        names = os.listdir(PROFILE_DIR)
+    except OSError:
+        return None
+    if want in names:
+        return PROFILE_DIR / want
+    folded = want.casefold()
+    for n in sorted(names):
+        if n.casefold() == folded:
+            return PROFILE_DIR / n
+    return None
+
+
 def save_profile(name, vector, *, seconds, chunks, model, replace=False) -> Path:
-    """保存声纹文件（原子写，权限 600）。同名且 replace=False 抛 VoiceprintError。"""
+    """保存声纹文件（原子写，权限 600）。同名（忽略大小写）且 replace=False 抛 VoiceprintError。
+
+    替换时若磁盘上的拼写与新名字只差大小写（Bob→bob），先把旧文件挪开再写新文件，
+    保证“文件名主干 == 里面的名字”，失败则把旧文件原样挪回。
+    """
     path = profile_path(name)
     unit = _unit(vector)
-    if path.exists() and not replace:
+    existing = existing_profile_path(name)
+    if existing is not None and not replace:
         raise VoiceprintError(f"声纹“{name}”已存在，加 --replace 可覆盖")
     if not PROFILE_DIR.exists():
         PROFILE_DIR.mkdir(parents=True)
@@ -80,7 +105,22 @@ def save_profile(name, vector, *, seconds, chunks, model, replace=False) -> Path
         "chunks": int(chunks),
         "vector": unit.tolist(),
     }
-    common.atomic_write_text(path, json.dumps(data, ensure_ascii=False))
+    payload = json.dumps(data, ensure_ascii=False)
+    if existing is not None and existing.name != path.name:
+        aside = existing.with_name(existing.name + ".replacing")
+        os.replace(existing, aside)             # 旧拼写先挪开（不删除），新文件才能以新拼写落盘
+        try:
+            common.atomic_write_text(path, payload)
+        except BaseException:
+            os.replace(aside, existing)
+            raise
+        os.chmod(path, 0o600)
+        try:
+            aside.unlink()
+        except OSError:
+            pass
+        return path
+    common.atomic_write_text(path, payload)
     os.chmod(path, 0o600)
     return path
 

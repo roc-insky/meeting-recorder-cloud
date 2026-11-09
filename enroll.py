@@ -84,7 +84,7 @@ def main(argv=None, *, deps=None) -> int:
     stderr = deps.get("stderr", sys.stderr)
     try:
         voiceprint.validate_name(args.name)
-        if voiceprint.profile_path(args.name).exists() and not args.replace:
+        if voiceprint.existing_profile_path(args.name) is not None and not args.replace:
             raise voiceprint.VoiceprintError(f"声纹“{args.name}”已存在，加 --replace 可覆盖")
 
         if args.file:

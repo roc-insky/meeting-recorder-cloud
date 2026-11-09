@@ -103,6 +103,53 @@ class ProfileStoreTest(TmpProfileDirTest):
             voiceprint.save_profile("a", np.zeros(DIM), seconds=1, chunks=1, model="m")
         self.assertFalse(self.dir.exists() and any(self.dir.iterdir()))
 
+    def test_case_only_replace_keeps_one_loadable_profile(self):
+        """Bob → bob（replace）：不论文件系统是否区分大小写，只剩 bob.json，里面的名字与文件名一致。"""
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        voiceprint.save_profile("bob", unit_vec(1), seconds=2, chunks=2, model="m", replace=True)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["bob.json"])
+        err = io.StringIO()
+        loaded = voiceprint.load_profiles(stderr=err)
+        self.assertEqual(list(loaded), ["bob"])
+        self.assertEqual(err.getvalue(), "")
+        np.testing.assert_allclose(loaded["bob"], unit_vec(1))
+        data = json.loads((self.dir / "bob.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["name"], Path(os.listdir(self.dir)[0]).stem)
+
+    def test_case_only_conflict_without_replace(self):
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        with self.assertRaises(voiceprint.VoiceprintError):
+            voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model="m")
+        self.assertEqual(sorted(os.listdir(self.dir)), ["Bob.json"])
+        self.assertEqual(list(voiceprint.load_profiles()), ["Bob"])
+        self.assertEqual(voiceprint.existing_profile_path("bOB").name, "Bob.json")
+
+    def test_case_only_replace_on_simulated_case_insensitive_fs(self):
+        """模拟不区分大小写的 os.replace：目标目录里已有同名不同拼写的文件时，写进那个旧拼写的文件。"""
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        real_replace = os.replace
+
+        def ci_replace(src, dst):
+            d = Path(dst)
+            for n in os.listdir(d.parent):
+                if n.casefold() == d.name.casefold() and n != d.name:
+                    dst = d.parent / n
+                    break
+            return real_replace(src, dst)
+
+        with mock.patch("voiceprint.os.replace", ci_replace), mock.patch("common.os.replace", ci_replace):
+            voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model="m", replace=True)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["bob.json"])
+        self.assertEqual(list(voiceprint.load_profiles()), ["bob"])
+
+    def test_case_only_replace_failure_restores_old_file(self):
+        voiceprint.save_profile("Bob", unit_vec(0), seconds=1, chunks=1, model="m")
+        with mock.patch("common.atomic_write_text", side_effect=OSError("磁盘满")):
+            with self.assertRaises(OSError):
+                voiceprint.save_profile("bob", unit_vec(1), seconds=1, chunks=1, model="m", replace=True)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["Bob.json"])
+        np.testing.assert_allclose(voiceprint.load_profiles()["Bob"], unit_vec(0))
+
     def test_load_empty_when_dir_missing(self):
         self.assertEqual(voiceprint.load_profiles(), {})
         self.assertEqual(voiceprint.list_profiles(), [])

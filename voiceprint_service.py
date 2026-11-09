@@ -68,7 +68,7 @@ class VoiceprintService:
         voiceprint.validate_name(name)
         if type(replace) is not bool:
             raise voiceprint.VoiceprintError("replace 必须是布尔值")
-        if not replace and voiceprint.profile_path(name).exists():
+        if not replace and voiceprint.existing_profile_path(name) is not None:
             raise voiceprint.VoiceprintError(f"声纹“{name}”已存在，勾选覆盖后可重新登记")
 
     # ---------- 提交任务 ----------
