@@ -36,6 +36,7 @@ SILENCE_WARN_S = 10.0         # 连续静音多久提醒
 LEVEL_FULL_SCALE = 0.1        # 电平条满格对应的 RMS（归一化）
 EXIT_RECORD_FAILED = 1
 EXIT_TRANSCRIBE_FAILED = 2
+EXIT_INTERRUPTED = 130      # 约定：被 Ctrl-C 打断
 
 
 class RecorderError(Exception):
@@ -151,7 +152,19 @@ def open_stream(factory: Callable[[], ContextManager], timeout: float = STREAM_O
         done.set()
 
     threading.Thread(target=work, name="mr-stream-open", daemon=True).start()
-    if not done.wait(timeout):
+    try:
+        finished = done.wait(timeout)
+    except BaseException:
+        # 等待被打断（Ctrl-C）：在锁内标记放弃；流若已交接过来就地关掉，
+        # 若还没打开成功，则由 mr-stream-open 线程在打开后自行关掉，不会泄漏。
+        with lock:
+            state["abandoned"] = True
+            handed = state["cm"]
+            state["cm"] = None
+        if handed is not None:
+            close_stream(handed)
+        raise
+    if not finished:
         with lock:
             if state["cm"] is None:
                 state["abandoned"] = True
@@ -341,7 +354,11 @@ def main(argv=None, *, deps=None) -> int:
     stop = deps.get("stop") or threading.Event()
     watch = SilenceWatch()
 
-    segmenter = _prepare_segmenter(deps, stderr) if args.live else None
+    try:
+        segmenter = _prepare_segmenter(deps, stderr) if args.live else None
+    except KeyboardInterrupt:       # 下载/加载 VAD 模型时按 Ctrl-C：干净退出，不打印 traceback
+        print("\n已取消。", file=stderr)
+        return EXIT_INTERRUPTED
     live_state = {"session": None, "warned": False}
 
     def on_started(meeting_dir: Path) -> None:
@@ -391,6 +408,11 @@ def main(argv=None, *, deps=None) -> int:
         _finish_live(live_state["session"], stderr)
         print(f"\n错误：{e}", file=stderr)
         return EXIT_RECORD_FAILED
+    except KeyboardInterrupt:
+        # 打开麦克风/建目录阶段被打断：流由 open_stream/record 的清理路径关闭，这里只收尾并给出中文提示
+        _finish_live(live_state["session"], stderr)
+        print("\n已取消录音。", file=stderr)
+        return EXIT_INTERRUPTED
     _finish_live(live_state["session"], stderr)
 
     print(f"\n录音已保存：{meeting_dir}", file=stdout)

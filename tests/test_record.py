@@ -1,6 +1,8 @@
 """record.py 的单元测试（假流、假 run，不使用真实麦克风、afconvert、模型或真实目录）。"""
 import contextlib
 import io
+import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -151,6 +153,57 @@ class OpenStreamTest(unittest.TestCase):
         cm = record.open_stream(lambda: CM())
         self.assertEqual(seen, [("mr-stream-open", True)])
         self.assertIsNotNone(cm)
+
+    def test_interrupted_wait_closes_late_stream(self):
+        """等待被 Ctrl-C 打断后，才打开成功的流必须被自动关闭（旧代码：流一直开着）。"""
+        release, exited = threading.Event(), threading.Event()
+
+        class CM:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                exited.set()
+                return False
+
+        def factory():
+            release.wait(5)
+            return CM()
+
+        threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGINT)).start()   # 真实 SIGINT 才能打断 Event.wait
+        with self.assertRaises(KeyboardInterrupt):
+            record.open_stream(factory, timeout=10)
+        self.assertFalse(exited.is_set())
+        release.set()
+        self.assertTrue(exited.wait(2), "迟到的流没有被关闭")
+
+    def test_interrupted_wait_closes_already_handed_off_stream(self):
+        """流已经交接给等待方、但等待恰好被打断：由 open_stream 就地关闭。"""
+        exited = threading.Event()
+        created = []
+
+        class CM:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                exited.set()
+                return False
+
+        class RaisingEvent(threading.Event):
+            def wait(self, timeout=None):
+                if timeout != 10:              # 只作用于 open_stream 的主等待，不影响 Thread.start 等内部使用
+                    return super().wait(timeout)
+                super().wait(2)               # 等线程把流交接完
+                if not created:
+                    created.append(1)
+                    raise KeyboardInterrupt
+                return super().wait(timeout)
+
+        with mock.patch.object(record.threading, "Event", RaisingEvent):
+            with self.assertRaises(KeyboardInterrupt):
+                record.open_stream(lambda: CM(), timeout=10)
+        self.assertTrue(exited.wait(2), "已交接的流没有被关闭")
 
     def test_open_stream_error(self):
         def factory():
@@ -508,6 +561,67 @@ class MainTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("实时转写已放弃等待", deps["stderr"].getvalue())
             self.assertTrue((Path(d) / "2026-11-09_1030" / "transcript.md").exists())
+
+    def test_main_keyboard_interrupt_while_opening_mic(self):
+        """打开麦克风卡住时按 Ctrl-C：退出码 130，中文提示，无 traceback，迟到的流随后被关闭。"""
+        release, exited = threading.Event(), threading.Event()
+
+        class SlowStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                exited.set()
+                return False
+
+        def slow_factory(callback):
+            release.wait(5)
+            return SlowStream()
+
+        with tempfile.TemporaryDirectory() as d:
+            deps, _ = self.make_deps(d, [tone(1.0)], stream_factory=slow_factory)
+            threading.Timer(0.2, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+            code = record.main(["--out", d, "--no-diarize"], deps=deps)
+            self.assertEqual(code, 130)
+            err = deps["stderr"].getvalue()
+            self.assertIn("已取消", err)
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(list(Path(d).iterdir()), [])     # 没留下空会议目录
+            release.set()
+            self.assertTrue(exited.wait(2), "迟到的麦克风流没有被关闭")
+
+    def test_main_interrupt_with_failing_cleanup_second_ctrl_c_still_exits(self):
+        class Session:
+            def __init__(self, segmenter, transcriber):
+                self.transcriber = transcriber
+
+            def feed(self, samples):
+                pass
+
+            def finish(self, timeout=10.0):
+                self.transcriber.stop(1)
+                raise KeyboardInterrupt           # 第二次 Ctrl-C 发生在收尾时
+
+        def interrupted_open(factory, timeout=None):
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as d:
+            deps, _ = self.live_deps(d, [tone(1.0)])
+            with mock.patch.object(record.live, "LiveSession", Session), \
+                    mock.patch.object(record, "open_stream", interrupted_open):
+                code = record.main(["--out", d, "--no-diarize", "--live"], deps=deps)
+            self.assertEqual(code, 130)
+            self.assertNotIn("Traceback", deps["stderr"].getvalue())
+
+    def test_main_keyboard_interrupt_while_preparing_live(self):
+        def vad_boom(*a, **k):
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as d:
+            deps, _ = self.make_deps(d, [tone(1.0)], vad_factory=vad_boom)
+            code = record.main(["--out", d, "--no-diarize", "--live"], deps=deps)
+            self.assertEqual(code, 130)
+            self.assertNotIn("Traceback", deps["stderr"].getvalue())
 
     def test_main_without_live_does_not_touch_vad(self):
         with tempfile.TemporaryDirectory() as d:
