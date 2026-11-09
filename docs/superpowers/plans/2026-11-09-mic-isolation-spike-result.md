@@ -120,8 +120,9 @@ $ .venv/bin/python spike/mic_isolation_probe.py --list-devices
 
 探针已支持补测入口：
 
-- 空转 CPU：`--mode persistent --cycles 1 --cycle-seconds 0 --idle-seconds 3600`，
+- 空转 CPU：`--mode persistent --cycles 1 --cycle-seconds 0 --idle-seconds 3600 --total-timeout 4000`，
   同时按计划用 `ps -o %cpu -p <pid>` 定时采样，取平均与最大。
+  探针默认总时长上限 300 秒，空转 1 小时必须显式加 `--total-timeout 4000`，否则会被提前截断。
 - 菜单栏麦克风指示灯：空转 1 小时期间人工观察是否一直亮。
 - 蓝牙切换：录音中切到蓝牙耳机，确认流能否自动恢复（看回调是否继续、wav 是否继续增长）。
 
@@ -157,4 +158,6 @@ $ .venv/bin/python spike/mic_isolation_probe.py --list-devices
   本机是硬件没有输入通道，但换机器后要区分这两种情况。
 - subprocess 模式的子进程残留、wav 半成品、退出码处理都未在真实设备上验证。
 - persistent 的空转 CPU、指示灯、蓝牙恢复全部未测。
+- 超时保护靠守护线程等待：如果 PortAudio 卡死时长时间不释放 GIL，看门狗线程本身也可能
+  拿不到 GIL，超时就不生效。这一点只能在有输入设备的机器上确认，不能靠假实现证明。
 - 因此 #2b 目前没有选型依据。
