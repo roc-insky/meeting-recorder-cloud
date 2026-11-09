@@ -490,6 +490,14 @@ class AnnotationTests(AppCase):
         r = self.mut("POST", f"/api/meetings/{MID}/annotations", json={"kind": "highlight", "t": 3, "text": "a"})
         self.assertEqual(r.status_code, 201)
 
+    def test_huge_integer_timestamp_400(self):
+        """401 位整数 t：应 400 而不是 500。"""
+        self.make_meeting()
+        body = '{"kind": "note", "t": %s, "text": "a"}' % ("1" + "0" * 400)
+        r = self.mut("POST", f"/api/meetings/{MID}/annotations", content=body,
+                     headers={"Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 400)
+
     def test_validation_400(self):
         self.make_meeting()
         bad = [{"kind": "x", "t": 1, "text": "a"}, {"kind": "note", "t": -1, "text": "a"},

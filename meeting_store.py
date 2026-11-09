@@ -103,14 +103,26 @@ def set_title(meeting_dir: Path, title) -> None:
     common.atomic_write_text(meeting_dir / _META, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
 
 
+def _valid_time(t) -> bool:
+    """t 必须是可表示为有限浮点数的非负数字。
+
+    math.isfinite() 遇到超大整数（如 401 位）会抛 OverflowError，这里统一转成“无效”。
+    """
+    if isinstance(t, bool) or not isinstance(t, (int, float)):
+        return False
+    try:
+        return math.isfinite(t) and t >= 0
+    except OverflowError:
+        return False
+
+
 def _valid_annotation(a) -> bool:
     if not isinstance(a, dict):
         return False
     t = a.get("t")
     text = a.get("text")
     return (a.get("kind") in ANNOTATION_KINDS
-            and isinstance(t, (int, float)) and not isinstance(t, bool)
-            and math.isfinite(t) and t >= 0
+            and _valid_time(t)
             and isinstance(text, str) and bool(text.strip()) and len(text) <= ANNOTATION_TEXT_MAX)
 
 
@@ -154,7 +166,7 @@ def add_annotation(meeting_dir: Path, kind, t, text) -> dict:
     """追加一条标注并原子落盘，返回该条；参数非法抛 ValueError，目录不存在抛 MeetingNotFound。"""
     if kind not in ANNOTATION_KINDS or not isinstance(kind, str):
         raise ValueError("标注类型必须是 note、highlight 或 comment")
-    if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or t < 0:
+    if not _valid_time(t):
         raise ValueError("时间必须是非负数字（秒）")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("标注内容不能为空")

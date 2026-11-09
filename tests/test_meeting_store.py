@@ -314,6 +314,25 @@ class AnnotationTests(StoreTestCase):
         ]), encoding="utf-8")
         self.assertEqual([a["text"] for a in meeting_store.list_annotations(d)], ["ok"])
 
+    def test_huge_integer_timestamp_skipped_not_crash(self):
+        """401 位整数的 t 在 math.isfinite 里会 OverflowError：读取应跳过该条而不是崩溃，且写入前备份原件。"""
+        d = self.mk("a")
+        huge = "1" + "0" * 400
+        (d / "annotations.json").write_text(
+            '[{"kind": "note", "t": %s, "text": "huge"}, {"kind": "note", "t": 2, "text": "ok"}]' % huge,
+            encoding="utf-8")
+        self.assertEqual([a["text"] for a in meeting_store.list_annotations(d)], ["ok"])
+        meeting_store.add_annotation(d, "note", 3, "new")
+        self.assertEqual([a["text"] for a in meeting_store.list_annotations(d)], ["ok", "new"])
+        backups = self._backups(d)
+        self.assertEqual(len(backups), 1)
+        self.assertIn(huge, backups[0].read_text(encoding="utf-8"))
+
+    def test_huge_integer_timestamp_rejected_on_add(self):
+        d = self.mk("a")
+        with self.assertRaises(ValueError):
+            meeting_store.add_annotation(d, "note", 10 ** 400, "x")
+
     def test_concurrent_adds_no_loss_and_valid_json(self):
         d = self.mk("a")
         n = 20
