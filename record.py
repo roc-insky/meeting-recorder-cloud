@@ -313,6 +313,8 @@ def _finish_live(session, stderr) -> None:
         return
     try:
         session.finish()
+    except KeyboardInterrupt:
+        print("警告：实时转写已放弃等待", file=stderr)
     except Exception as e:  # noqa: BLE001
         print(f"警告：实时转写收尾失败（{e}）", file=stderr)
 

@@ -36,9 +36,17 @@ def models_present(cache_dir: Path) -> list:
     return missing
 
 
+DOWNLOAD_TIMEOUT_S = 15.0  # 连接与每次读取的超时，网络卡住时不会无限等
+_DOWNLOAD_CHUNK = 1 << 20
+
+
 def _default_download(url: str, dest: Path) -> None:
-    """真实下载：urllib 写到 dest（调用方传入 .part 路径）。"""
-    urllib.request.urlretrieve(url, dest)
+    """真实下载：urllib 分块写到 dest（调用方传入 .part 路径）；下载为空文件则抛 OSError。"""
+    with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_S) as resp, open(dest, "wb") as out:
+        while chunk := resp.read(_DOWNLOAD_CHUNK):
+            out.write(chunk)
+    if dest.stat().st_size == 0:
+        raise OSError("下载内容为空")
 
 
 def _discard(path: Path) -> None:

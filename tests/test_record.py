@@ -489,6 +489,26 @@ class MainTest(unittest.TestCase):
             self.assertIn("实时转写不可用", deps["stderr"].getvalue())
             self.assertEqual(list(Path(models).iterdir()), [])
 
+    def test_main_live_finish_keyboard_interrupt_continues(self):
+        class InterruptedSession:
+            def __init__(self, segmenter, transcriber):
+                self.transcriber = transcriber
+
+            def feed(self, samples):
+                pass
+
+            def finish(self, timeout=10.0):
+                self.transcriber.stop(1)
+                raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as d:
+            deps, _ = self.live_deps(d, [tone(1.0)])
+            with mock.patch.object(record.live, "LiveSession", InterruptedSession):
+                code = record.main(["--out", d, "--no-diarize", "--live"], deps=deps)
+            self.assertEqual(code, 0)
+            self.assertIn("实时转写已放弃等待", deps["stderr"].getvalue())
+            self.assertTrue((Path(d) / "2026-11-09_1030" / "transcript.md").exists())
+
     def test_main_without_live_does_not_touch_vad(self):
         with tempfile.TemporaryDirectory() as d:
             def fail(*a, **k):

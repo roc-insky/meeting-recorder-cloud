@@ -16,6 +16,7 @@ import diarize
 import transcribe
 
 VAD_FILE = "silero_vad.onnx"
+VAD_MIN_BYTES = 100 * 1024  # 官方文件约 644 KB；过小说明损坏，加载会让 sherpa 直接退出进程
 VAD_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/" + VAD_FILE
 
 VAD_THRESHOLD = 0.5
@@ -28,9 +29,9 @@ STOP_TIMEOUT_S = 10.0
 
 
 def models_present(cache_dir: Path) -> list:
-    """返回缺失的模型文件名（0 字节也算缺失）。只读，不联网、不创建目录。"""
+    """返回缺失的模型文件名（小于 VAD_MIN_BYTES 视为缺失或损坏）。只读，不联网、不创建目录。"""
     try:
-        ok = (Path(cache_dir) / VAD_FILE).stat().st_size > 0
+        ok = (Path(cache_dir) / VAD_FILE).stat().st_size >= VAD_MIN_BYTES
     except OSError:
         ok = False
     return [] if ok else [VAD_FILE]
@@ -47,8 +48,8 @@ def ensure_vad_model(cache_dir: Path = diarize.MODEL_DIR, *, download=None) -> P
     part = dest.with_name(dest.name + ".part")
     try:
         download(VAD_URL, part)
-        if part.stat().st_size == 0:
-            raise OSError("VAD 模型下载为空文件")
+        if part.stat().st_size < VAD_MIN_BYTES:
+            raise OSError("VAD 模型下载不完整")
         os.replace(part, dest)
     finally:
         diarize._discard(part)
@@ -74,6 +75,20 @@ def _sherpa_vad_factory(model_path: Path):
         return sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=VAD_BUFFER_S)
 
     return make
+
+
+def _is_cjk(ch: str) -> bool:
+    return "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef"
+
+
+def join_texts(texts) -> str:
+    """拼接同一句的多个片段：任一侧边界字符是中日韩字符或全角标点就不加空格，否则加一个空格。"""
+    out = ""
+    for t in texts:
+        if out and not (_is_cjk(out[-1]) or _is_cjk(t[0])):
+            out += " "
+        out += t
+    return out
 
 
 def _warn(stream, message: str) -> None:
@@ -186,7 +201,7 @@ class LiveTranscriber:
                 start_s, samples = self._items.popleft()
             try:
                 segs = transcribe.filter_segments(self._fn(samples))
-                text = " ".join(s["text"] for s in segs)
+                text = join_texts(s["text"] for s in segs)
                 if text and not self._abandoned:
                     self._sink.write(start_s, text)
             except Exception as e:  # noqa: BLE001 实时转写出错绝不能影响录音

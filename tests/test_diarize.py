@@ -4,6 +4,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -166,6 +167,51 @@ class DiarizeTest(unittest.TestCase):
     def test_diarize_sorts_by_start(self):
         runner = lambda audio, num_clusters, threshold: [(2.0, 3.0, 5), (0.0, 1.0, 9)]
         self.assertEqual(diarize.diarize(self.samples(3), runner=runner), [(0.0, 1.0, 0), (2.0, 3.0, 1)])
+
+class DefaultDownloadTest(unittest.TestCase):
+    """_default_download：用假 urlopen，不联网。"""
+
+    class FakeResp:
+        def __init__(self, data):
+            self._buf = io.BytesIO(data)
+
+        def read(self, n=-1):
+            return self._buf.read(n)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_passes_timeout_and_writes_chunks(self):
+        calls = []
+
+        def fake_urlopen(url, timeout=None):
+            calls.append((url, timeout))
+            return self.FakeResp(b"ab" * 10)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(diarize, "_DOWNLOAD_CHUNK", 3), \
+                mock.patch.object(diarize.urllib.request, "urlopen", fake_urlopen):
+            dest = Path(d) / "x.part"
+            diarize._default_download("http://example/x", dest)
+            self.assertEqual(dest.read_bytes(), b"ab" * 10)
+        self.assertEqual(calls, [("http://example/x", diarize.DOWNLOAD_TIMEOUT_S)])
+        self.assertEqual(diarize.DOWNLOAD_TIMEOUT_S, 15.0)
+
+    def test_empty_download_raises(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(diarize.urllib.request, "urlopen", lambda url, timeout=None: self.FakeResp(b"")):
+            with self.assertRaises(OSError):
+                diarize._default_download("http://example/x", Path(d) / "x.part")
+
+    def test_empty_download_via_ensure_leaves_no_part_or_target(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(diarize.urllib.request, "urlopen", lambda url, timeout=None: self.FakeResp(b"")):
+            dest = Path(d) / "m.onnx"
+            with self.assertRaises(OSError):
+                diarize._fetch_embedding(dest, diarize._default_download)
+            self.assertEqual(list(Path(d).iterdir()), [])
 
 
 if __name__ == "__main__":

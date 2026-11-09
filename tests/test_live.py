@@ -82,7 +82,9 @@ class ModelsTest(unittest.TestCase):
             self.assertEqual(live.models_present(d), [live.VAD_FILE])
             (d / live.VAD_FILE).write_bytes(b"")
             self.assertEqual(live.models_present(d), [live.VAD_FILE])  # 0 字节算缺失
-            (d / live.VAD_FILE).write_bytes(b"x")
+            (d / live.VAD_FILE).write_bytes(b"x" * 10)
+            self.assertEqual(live.models_present(d), [live.VAD_FILE])  # 过小视为损坏
+            (d / live.VAD_FILE).write_bytes(b"x" * live.VAD_MIN_BYTES)
             self.assertEqual(live.models_present(d), [])
 
     def test_ensure_vad_model_downloads_atomically(self):
@@ -92,14 +94,22 @@ class ModelsTest(unittest.TestCase):
 
             def dl(url, dest):
                 calls.append((url, dest.name))
-                dest.write_bytes(b"onnx")
+                dest.write_bytes(b"o" * live.VAD_MIN_BYTES)
 
             path = live.ensure_vad_model(d, download=dl)
             self.assertEqual(path, d / live.VAD_FILE)
-            self.assertEqual(path.read_bytes(), b"onnx")
+            self.assertEqual(path.read_bytes(), b"o" * live.VAD_MIN_BYTES)
             self.assertEqual(calls, [(live.VAD_URL, live.VAD_FILE + ".part")])
             self.assertEqual([p.name for p in d.iterdir()], [live.VAD_FILE])
             live.ensure_vad_model(d, download=lambda u, p: self.fail("已存在不应再下载"))
+
+    def test_ensure_vad_model_replaces_tiny_cached_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / live.VAD_FILE).write_bytes(b"0123456789")  # 10 字节：损坏
+            path = live.ensure_vad_model(d, download=lambda u, p: p.write_bytes(b"v" * live.VAD_MIN_BYTES))
+            self.assertEqual(path.stat().st_size, live.VAD_MIN_BYTES)
+            self.assertEqual([p.name for p in d.iterdir()], [live.VAD_FILE])
 
     def test_ensure_vad_model_failure_leaves_no_part(self):
         with tempfile.TemporaryDirectory() as d:
@@ -116,6 +126,23 @@ class ModelsTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 live.ensure_vad_model(Path(d), download=lambda u, p: p.write_bytes(b""))
             self.assertEqual(list(Path(d).iterdir()), [])
+
+
+class JoinTextsTest(unittest.TestCase):
+    def test_join_texts(self):
+        self.assertEqual(live.join_texts(["你好", "世界"]), "你好世界")
+        self.assertEqual(live.join_texts(["hello", "world"]), "hello world")
+        self.assertEqual(live.join_texts(["你好", "OK"]), "你好OK")
+        self.assertEqual(live.join_texts(["OK", "你好"]), "OK你好")
+        self.assertEqual(live.join_texts(["好，", "ok"]), "好，ok")
+        self.assertEqual(live.join_texts([]), "")
+
+    def test_transcriber_joins_chinese_segments_without_space(self):
+        sink = RecordingSink()
+        t = live.LiveTranscriber(lambda s: [{"text": "你好"}, {"text": "世界"}], sink)
+        t.submit(0.0, np.zeros(1, dtype=np.float32))
+        t.stop(5)
+        self.assertEqual(sink.lines, [(0.0, "你好世界")])
 
 
 class SegmenterTest(unittest.TestCase):
