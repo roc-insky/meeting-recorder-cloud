@@ -12,6 +12,48 @@ MARKED_VERSION = "18.1.2"
 PURIFY_VERSION = "3.4.17"
 
 
+def url_concat_violations(js: str):
+    """扫描 '/api/…' + 动态片段 的拼接，返回 (未用 encodeURIComponent 包裹的片段列表, 拼接总数)。
+
+    从字符串字面量后的 + 开始，按括号深度切分到同层的 , 或 ) 为止；
+    各片段里除字符串字面量外都必须以 encodeURIComponent( 开头。
+    """
+    bad, count = [], 0
+    for m in re.finditer(r"'/api/[^']*'\s*\+", js):
+        count += 1
+        i, depth, piece, pieces, quote = m.end(), 0, "", [], None
+        while i < len(js):
+            c = js[i]
+            if quote:
+                piece += c
+                if c == quote:
+                    quote = None
+            elif c in "'\"":
+                quote = c
+                piece += c
+            elif c in "([{":
+                depth += 1
+                piece += c
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+                piece += c
+            elif c == "," and depth == 0:
+                break
+            elif c == "+" and depth == 0:
+                pieces.append(piece.strip())
+                piece = ""
+            else:
+                piece += c
+            i += 1
+        pieces.append(piece.strip())
+        for p in pieces:
+            if p and not re.fullmatch(r"'[^']*'", p) and not p.startswith("encodeURIComponent("):
+                bad.append(p)
+    return bad, count
+
+
 def read(name: str) -> str:
     return (STATIC / name).read_text(encoding="utf-8")
 
@@ -126,10 +168,86 @@ class StaticFilesTest(unittest.TestCase):
         self.assertIn("overflow-y: auto", css)
 
     def test_urls_use_encodeuricomponent(self):
+        """所有 '/api/…' + 动态片段 的拼接，动态片段都必须包在 encodeURIComponent( 里。"""
+        total = 0
         for name in ("app.js", "interview.js"):
             js = read(name)
-            for m in re.finditer(r"`/api/[^`]*\$\{([^}]*)\}", js):
-                self.assertIn("encodeURIComponent", m.group(1), f"{name}: {m.group(0)}")
+            bad, count = url_concat_violations(js)
+            self.assertEqual(bad, [], f"{name} 有未编码的 URL 片段：{bad}")
+            total += count
+        self.assertGreaterEqual(total, 10, "找到的拼接 URL 太少，检查逻辑可能失效")
+
+    def test_url_check_detects_missing_encode(self):
+        """变异验证：去掉任意一处 encodeURIComponent，检查必须报错（防止测试空转）。"""
+        js = read("app.js")
+        mutated = js.replace("'/api/meetings/' + encodeURIComponent(id) + '/summary'",
+                             "'/api/meetings/' + id + '/summary'")
+        self.assertNotEqual(js, mutated)
+        bad, _ = url_concat_violations(mutated)
+        self.assertEqual(len(bad), 1)
+        bad, _ = url_concat_violations("api('GET', '/api/x/' + encodeURIComponent(a) + '/y' + b)")
+        self.assertEqual(len(bad), 1)
+        bad, _ = url_concat_violations("api('GET', '/api/x/' + encodeURIComponent(a) + '/y', {k: 1 + 2})")
+        self.assertEqual(bad, [])
+
+    def test_sanitize_whitelist_pinned(self):
+        """净化白名单固定：不得出现 script/img/style/iframe 等标签与 onerror/style 等属性，链接只允许 http(s)/mailto。"""
+        js = read("interview.js")
+        opts = re.search(r"const SANITIZE_OPTIONS\s*=\s*\{(.*?)\n\};", js, re.S)
+        self.assertIsNotNone(opts, "找不到 SANITIZE_OPTIONS")
+        body = opts.group(1)
+        tags = re.search(r"ALLOWED_TAGS:\s*\[(.*?)\]", body, re.S)
+        attrs = re.search(r"ALLOWED_ATTR:\s*\[(.*?)\]", body, re.S)
+        self.assertIsNotNone(tags)
+        self.assertIsNotNone(attrs)
+        tag_list = re.findall(r"'([^']+)'", tags.group(1))
+        attr_list = re.findall(r"'([^']+)'", attrs.group(1))
+        self.assertTrue(tag_list)
+        for forbidden in ("script", "img", "style", "iframe", "object", "embed", "form", "input", "svg",
+                          "math", "link", "meta", "base", "video", "audio", "button", "textarea"):
+            self.assertNotIn(forbidden, tag_list)
+        self.assertEqual(attr_list, ["href"])
+        self.assertRegex(body, r"ALLOW_DATA_ATTR:\s*false")
+        self.assertNotRegex(body, r"ADD_TAGS|ADD_ATTR|ALLOW_UNKNOWN_PROTOCOLS|USE_PROFILES|FORBID_|WHOLE_DOCUMENT")
+        self.assertIn("DOMPurify.sanitize(marked.parse(String(markdown), { async: false }), SANITIZE_OPTIONS)", js)
+        # URI 正则：只放行 http / https / mailto
+        m = re.search(r"ALLOWED_URI_REGEXP:\s*/(.*)/([a-z]*),", body)
+        self.assertIsNotNone(m)
+        self.assertTrue(m.group(1).startswith("^"), "URI 正则必须以 ^ 锚定开头")
+        rx = re.compile(m.group(1), re.I if "i" in m.group(2) else 0)
+        for ok in ("http://a.b/c", "https://a.b/c", "HTTPS://a.b", "mailto:a@b.c"):
+            self.assertIsNotNone(rx.search(ok), ok)
+        for bad in ("javascript:alert(1)", "JaVaScRiPt:alert(1)", "data:text/html;base64,AAAA", "vbscript:x",
+                    "file:///etc/passwd", "ftp://a.b", "//evil.com/x", "/relative", " javascript:1",
+                    "javascript:alert('http://x')", "xhttp://a.b", "data:text/html,https://a.b"):
+            self.assertIsNone(rx.search(bad), bad)
+
+    def test_sanitize_check_detects_mutation(self):
+        """变异验证：往白名单加 script/img 或属性 onerror，上面用到的提取逻辑必须能看见它们。"""
+        js = read("interview.js")
+        mutated = js.replace("'blockquote',", "'blockquote', 'script', 'img',").replace(
+            "ALLOWED_ATTR: ['href']", "ALLOWED_ATTR: ['href', 'onerror']")
+        self.assertNotEqual(js, mutated)
+        body = re.search(r"const SANITIZE_OPTIONS\s*=\s*\{(.*?)\n\};", mutated, re.S).group(1)
+        tags = re.findall(r"'([^']+)'", re.search(r"ALLOWED_TAGS:\s*\[(.*?)\]", body, re.S).group(1))
+        attrs = re.findall(r"'([^']+)'", re.search(r"ALLOWED_ATTR:\s*\[(.*?)\]", body, re.S).group(1))
+        self.assertIn("script", tags)
+        self.assertIn("img", tags)
+        self.assertNotEqual(attrs, ["href"])
+
+    def test_voiceprint_busy_recovers_and_start_clears_late(self):
+        """声纹忙碌标记要能自己恢复；开始录音失败时不能先清掉界面。"""
+        js = read("app.js")
+        self.assertIn("function pollVpBusy", js)
+        fin = re.search(r"function finishVoiceprint\(.*?\n\}\n", js, re.S).group(0)
+        self.assertIn("pollVpBusy()", fin)
+        cancel = re.search(r"async function cancelVoiceprint\(.*?\n\}\n", js, re.S).group(0)
+        self.assertIn("pollVpBusy()", cancel)
+        start = re.search(r"async function startRecording\(.*?\n\}\n", js, re.S).group(0)
+        self.assertNotIn("clearView()", start)
+        self.assertLess(start.index("api('POST', '/api/recording/start'"), start.index("beginRecordingView("))
+        begin = re.search(r"function beginRecordingView\(.*?\n\}\n", js, re.S).group(0)
+        self.assertIn("clearView()", begin)
 
 
 if __name__ == "__main__":

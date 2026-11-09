@@ -10,6 +10,7 @@ const REC_LABELS = { idle: '空闲', recording: '录音中', stopping: '正在�
 const VP_SECONDS = 30;
 const VP_POLL_MS = 500;
 const SSE_RETRY_MS = 2000;
+const VP_BUSY_POLL_MS = 1500;
 const TS_LINE = /^\[(\d{2,}):(\d{2}):(\d{2})\] ?(.*)$/;
 
 const $ = (id) => document.getElementById(id);
@@ -409,9 +410,8 @@ async function startRecording() {
   if (speakers !== null) body.speakers = speakers;
   await busy('start', [$('btn-start')], async () => {
     try {
-      clearView();                          // 先清掉上一场的选中行与转写残留
-      const r = await api('POST', '/api/recording/start', body);
-      beginRecordingView(r.meeting_id);
+      const r = await api('POST', '/api/recording/start', body);   // 失败时保留原有选中行与转写
+      beginRecordingView(r.meeting_id);                            // 成功后才清掉上一场的选中行与转写残留
     } catch (e) {
       toast(errText(e), true);
     }
@@ -856,6 +856,7 @@ function finishVoiceprint(job, message, isError) {
   vpMessage(message);
   toast(message, isError);
   loadVoiceprints();
+  pollVpBusy();                         // 工作线程退出前后端仍算忙，轮询到空闲为止
   refreshControls();
 }
 
@@ -872,11 +873,26 @@ async function cancelVoiceprint() {
     const r = await api('POST', '/api/voiceprints/jobs/' + encodeURIComponent(job.id) + '/cancel');
     vpMessage(r && r.cancelled ? '已取消本次录制。' : '这次登记已经结束。');
     loadVoiceprints();
+    pollVpBusy();
   } catch (e) {
     vpMessage(errText(e));
     toast(errText(e), true);
   }
   refreshControls();
+}
+
+/** 声纹任务占着麦克风时，隔一会儿问一次 /api/state，直到空闲，这样不用刷新页面就能恢复“开始录音”。 */
+let vpBusyTimer = null;
+async function pollVpBusy() {
+  clearTimeout(vpBusyTimer);
+  try {
+    const st = await api('GET', '/api/state');
+    S.vpBusy = Boolean(st.voiceprint_busy);
+  } catch (e) {
+    S.vpBusy = false;                   // 取不到状态时不要一直锁住按钮，真正冲突由后端 409 提示
+  }
+  refreshControls();
+  if (S.vpBusy) vpBusyTimer = setTimeout(pollVpBusy, VP_BUSY_POLL_MS);
 }
 
 // ---------- 初始化 ----------
@@ -885,6 +901,7 @@ async function loadState() {
     const st = await api('GET', '/api/state');
     S.vpBusy = Boolean(st.voiceprint_busy);
     applySnapshot(st);
+    if (S.vpBusy) pollVpBusy();
   } catch (e) {
     toast(errText(e), true);
   }
