@@ -7,6 +7,9 @@ main 的 deps 字典（均可选，便于测试）：
   now / free_bytes_fn                        时间与可用空间
   stdout / stderr                            输出流
   transcribe_fn / diarize_fn / started       原样传给 transcribe.main
+  vad_factory() -> VAD 检测器                 --live 时替换真实 Silero VAD（缺省会先确保 VAD 模型已下载）
+  live_transcribe_fn(audio, **kwargs)         --live 逐句转写用，缺省 mlx_whisper
+  vad_model_dir / vad_download                VAD 模型缓存目录与下载函数（测试注入，缺省用 diarize.MODEL_DIR 与 urllib）
 """
 import argparse
 import queue
@@ -22,6 +25,8 @@ from typing import Callable, ContextManager
 import numpy as np
 
 import common
+import diarize
+import live
 import transcribe
 
 HEADER_SYNC_S = 1.0          # 每累计这么多秒音频就回写一次 wav 头里的长度
@@ -204,12 +209,15 @@ def record(
     now=datetime.now,
     on_level=None,
     on_samples=None,
+    on_started=None,
     free_bytes_fn=common.free_bytes,
 ) -> Path:
     """录音直到 stop 被置位（或收到 Ctrl-C），返回会议目录。
 
     流打开成功后才创建会议目录，打不开不留空目录。
     流回调只把块放入队列，写盘与回调都在本函数的主循环里。
+    on_started(meeting_dir) 在会议目录和 wav 建好后、开始消费音频前调用一次（实时转写靠它拿到目录）；
+    它抛出的异常会被忽略，不影响录音。
     """
     out_root = Path(out_root)
     if free_bytes_fn(_existing_ancestor(out_root)) < common.MIN_FREE_BYTES:
@@ -226,6 +234,11 @@ def record(
             writer = WavWriter(meeting_dir / "meeting.wav")
         except OSError as e:
             raise RecorderError(f"无法创建录音文件（{e}）") from e
+        if on_started is not None:
+            try:
+                on_started(meeting_dir)
+            except Exception:  # noqa: BLE001 附加功能出错不能影响录音
+                pass
 
         def handle(chunk) -> None:
             chunk = np.asarray(chunk)
@@ -278,6 +291,32 @@ def _real_stream_factory(callback):
     )
 
 
+def _prepare_segmenter(deps: dict, stderr):
+    """为 --live 准备切句器；VAD 模型下载或加载失败就警告并返回 None（录音不受影响）。"""
+    try:
+        factory = deps.get("vad_factory")
+        if factory is None:
+            print("正在检查实时转写所需的 VAD 模型…", file=stderr)
+            path = live.ensure_vad_model(
+                deps.get("vad_model_dir", diarize.MODEL_DIR), download=deps.get("vad_download")
+            )
+            factory = live._sherpa_vad_factory(path)
+        return live.Segmenter(factory)
+    except Exception as e:  # noqa: BLE001
+        print(f"警告：实时转写不可用，将只录音（{e}）", file=stderr)
+        return None
+
+
+def _finish_live(session, stderr) -> None:
+    """录音结束后冲出尾句并等实时转写收尾（最多 10 秒）；出错只警告。"""
+    if session is None:
+        return
+    try:
+        session.finish()
+    except Exception as e:  # noqa: BLE001
+        print(f"警告：实时转写收尾失败（{e}）", file=stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="录制会议并转写")
     p.add_argument("--out", metavar="DIR", default=None, help="输出根目录（默认 ~/Meetings）")
@@ -285,7 +324,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--speakers", type=transcribe._positive_int, metavar="N", help="指定说话人数（整数 ≥1）")
     group.add_argument("--no-diarize", action="store_true", help="不区分说话人")
     p.add_argument("--model", default=transcribe.DEFAULT_MODEL, help="转写模型")
-    p.add_argument("--live", action="store_true", help="实时转写（尚未实现，Task 5 接入）")
+    p.add_argument("--live", action="store_true", help="边录边转写，结果显示在终端并写入 live.txt")
+    p.add_argument("--live-model", metavar="REPO", default=transcribe.DEFAULT_MODEL, help="实时转写模型（默认同 --model 的默认值）")
     return p
 
 
@@ -299,8 +339,24 @@ def main(argv=None, *, deps=None) -> int:
     stop = deps.get("stop") or threading.Event()
     watch = SilenceWatch()
 
-    if args.live:
-        print("提示：实时转写尚未实现，已忽略 --live", file=stderr)
+    segmenter = _prepare_segmenter(deps, stderr) if args.live else None
+    live_state = {"session": None, "warned": False}
+
+    def on_started(meeting_dir: Path) -> None:
+        """会议目录建好后启动实时转写；失败只警告，录音照常。"""
+        if segmenter is None:
+            return
+        try:
+            sink = live.LiveSink(meeting_dir / "live.txt", out=stdout, stderr=stderr)
+            live_fn = deps.get("live_transcribe_fn")
+            transcriber = live.LiveTranscriber(
+                lambda audio: transcribe.transcribe_samples(audio, model=args.live_model, transcribe_fn=live_fn),
+                sink,
+                stderr=stderr,
+            )
+            live_state["session"] = live.LiveSession(segmenter, transcriber)
+        except Exception as e:  # noqa: BLE001
+            print(f"\n警告：实时转写启动失败，继续录音（{e}）", file=stderr)
 
     def on_level(rms: float) -> None:
         print(f"\r录音中 {level_bar(rms)}  Ctrl-C 停止", end="", file=stdout, flush=True)
@@ -308,6 +364,14 @@ def main(argv=None, *, deps=None) -> int:
     def on_samples(samples: np.ndarray) -> None:
         if watch.update(samples, time.monotonic()):
             print(f"\n警告：已连续 {int(SILENCE_WARN_S)} 秒几乎没有声音，请检查麦克风", file=stderr)
+        session = live_state["session"]
+        if session is not None:
+            try:
+                session.feed(samples)  # 只切句并入队，不等转写
+            except Exception as e:  # noqa: BLE001 实时转写出错不能中断录音
+                if not live_state["warned"]:
+                    live_state["warned"] = True
+                    print(f"\n警告：实时转写出错，已跳过（{e}）", file=stderr)
 
     print("开始录音，按 Ctrl-C 停止。", file=stdout)
     try:
@@ -318,11 +382,14 @@ def main(argv=None, *, deps=None) -> int:
             now=deps.get("now", datetime.now),
             on_level=on_level,
             on_samples=on_samples,
+            on_started=on_started,
             free_bytes_fn=deps.get("free_bytes_fn", common.free_bytes),
         )
     except RecorderError as e:
+        _finish_live(live_state["session"], stderr)
         print(f"\n错误：{e}", file=stderr)
         return EXIT_RECORD_FAILED
+    _finish_live(live_state["session"], stderr)
 
     print(f"\n录音已保存：{meeting_dir}", file=stdout)
     wav = meeting_dir / "meeting.wav"

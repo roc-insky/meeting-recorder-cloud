@@ -16,6 +16,7 @@ import numpy as np
 import common
 import record
 import voiceprint
+from tests.test_live import FakeVad
 
 
 def tone(seconds: float = 1.0, amp: int = 3000) -> np.ndarray:
@@ -410,12 +411,109 @@ class MainTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(seen, {"speakers": 3, "model": "m/x"})
 
-    def test_main_live_flag_accepted_but_ignored(self):
+    def live_deps(self, d, chunks, **extra):
+        """--live 用的 deps：假 VAD、假转写，绝不碰真实模型和下载。"""
+        extra.setdefault("vad_factory", FakeVad)
+        extra.setdefault("live_transcribe_fn", lambda audio, **kw: {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "实时一句", "no_speech_prob": 0.0}]
+        })
+        return self.make_deps(d, chunks, **extra)
+
+    def test_main_live_writes_live_txt(self):
         with tempfile.TemporaryDirectory() as d:
-            deps, _ = self.make_deps(d, [tone(1.0)])
+            quiet = np.zeros(8000, dtype=np.int16)
+            deps, _ = self.live_deps(d, [quiet, tone(1.0), quiet])
             code = record.main(["--out", d, "--no-diarize", "--live"], deps=deps)
             self.assertEqual(code, 0)
-            self.assertIn("--live", deps["stderr"].getvalue())
+            mdir = Path(d) / "2026-11-09_1030"
+            self.assertEqual((mdir / "live.txt").read_text(encoding="utf-8"), "[00:00:00] 实时一句\n")
+            self.assertIn("[00:00:00] 实时一句", deps["stdout"].getvalue())
+            self.assertTrue((mdir / "transcript.md").exists())
+
+    def test_main_live_flushes_tail_on_stop(self):
+        with tempfile.TemporaryDirectory() as d:
+            deps, _ = self.live_deps(d, [tone(1.0)])  # 没有结尾静音：靠 stop 时冲出尾句
+            self.assertEqual(record.main(["--out", d, "--no-diarize", "--live"], deps=deps), 0)
+            live_txt = Path(d) / "2026-11-09_1030" / "live.txt"
+            self.assertIn("实时一句", live_txt.read_text(encoding="utf-8"))
+
+    def test_main_live_model_forwarded_and_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = []
+
+            def fake_live(audio, **kw):
+                seen.append(kw["path_or_hf_repo"])
+                return {"segments": []}
+
+            deps, _ = self.live_deps(d, [tone(1.0)], live_transcribe_fn=fake_live)
+            record.main(["--out", d, "--no-diarize", "--live", "--live-model", "m/live"], deps=deps)
+            self.assertEqual(seen, ["m/live"])
+        self.assertEqual(record.build_parser().parse_args([]).live_model, record.transcribe.DEFAULT_MODEL)
+
+    def test_live_error_does_not_stop_recording(self):
+        with tempfile.TemporaryDirectory() as d:
+            def boom(audio, **kw):
+                raise RuntimeError("实时模型坏了")
+
+            deps, _ = self.live_deps(d, [tone(1.0), tone(1.0)], live_transcribe_fn=boom)
+            code = record.main(["--out", d, "--no-diarize", "--live"], deps=deps)
+            self.assertEqual(code, 0)
+            mdir = Path(d) / "2026-11-09_1030"
+            rate, samples = common.read_wav_tolerant(mdir / "meeting.wav")
+            self.assertEqual(samples.size, 2 * 16000)
+            self.assertIn("实时模型坏了", deps["stderr"].getvalue())
+
+    def test_live_segmenter_error_does_not_stop_recording(self):
+        class BadVad(FakeVad):
+            def accept_waveform(self, samples):
+                raise RuntimeError("VAD 崩了")
+
+        with tempfile.TemporaryDirectory() as d:
+            deps, _ = self.live_deps(d, [tone(1.0), tone(1.0)], vad_factory=BadVad)
+            self.assertEqual(record.main(["--out", d, "--no-diarize", "--live"], deps=deps), 0)
+            _, samples = common.read_wav_tolerant(Path(d) / "2026-11-09_1030" / "meeting.wav")
+            self.assertEqual(samples.size, 2 * 16000)
+            self.assertEqual(deps["stderr"].getvalue().count("VAD 崩了"), 1)  # 只警告一次
+
+    def test_main_live_vad_download_failure_still_records(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as models:
+            def no_net(url, dest):
+                raise OSError("断网")
+
+            deps, _ = self.make_deps(d, [tone(1.0)], vad_model_dir=Path(models), vad_download=no_net)
+            code = record.main(["--out", d, "--no-diarize", "--live"], deps=deps)
+            self.assertEqual(code, 0)
+            mdir = Path(d) / "2026-11-09_1030"
+            self.assertTrue((mdir / "meeting.wav").exists())
+            self.assertFalse((mdir / "live.txt").exists())
+            self.assertIn("实时转写不可用", deps["stderr"].getvalue())
+            self.assertEqual(list(Path(models).iterdir()), [])
+
+    def test_main_without_live_does_not_touch_vad(self):
+        with tempfile.TemporaryDirectory() as d:
+            def fail(*a, **k):
+                self.fail("未加 --live 不应准备 VAD")
+
+            deps, _ = self.make_deps(d, [tone(1.0)], vad_factory=fail, vad_download=fail)
+            self.assertEqual(record.main(["--out", d, "--no-diarize"], deps=deps), 0)
+            self.assertFalse((Path(d) / "2026-11-09_1030" / "live.txt").exists())
+
+    def test_record_on_started_gets_meeting_dir_and_errors_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = []
+
+            def started(meeting_dir):
+                seen.append(meeting_dir)
+                raise RuntimeError("回调坏了")
+
+            stop = threading.Event()
+            mdir = record.record(
+                Path(d), stream_factory=fake_factory([tone(0.5)], stop), stop=stop,
+                now=lambda: datetime(2026, 11, 9, 10, 30), on_started=started,
+                free_bytes_fn=lambda p: common.MIN_FREE_BYTES,
+            )
+            self.assertEqual(seen, [mdir])
+            self.assertTrue((mdir / "meeting.wav").exists())
 
     def test_main_exclusive_flags(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
