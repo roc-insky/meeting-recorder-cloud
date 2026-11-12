@@ -178,12 +178,12 @@ def _is_configured(cfg) -> bool:
 
 
 def _probe(cfg: dict, opener) -> int:
-    """发一次最小请求（一条消息、max_tokens=1），只返回状态码，不读也不解析正文。"""
+    """发一次最小请求（一条消息、max_tokens=16），只返回状态码，不读也不解析正文。"""
     url = _endpoint(cfg)                            # 地址非法时抛 LLMError(MSG_BAD_URL)
     payload = json.dumps({
         "model": cfg["model"],
         "messages": [{"role": "user", "content": "请回复：好"}],
-        "max_tokens": 1,
+        "max_tokens": 16,
         "stream": False,
     }, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=payload, method="POST", headers={
@@ -215,7 +215,7 @@ def test_connection(cfg: dict | None, *, opener=None) -> tuple[bool, str]:
 
     原因只会是 CONN_OK / CONN_NOT_CONFIGURED / CONN_CONNECT / CONN_AUTH /
     CONN_SERVER / CONN_TIMEOUT / CONN_REDIRECT 之一。
-    发一条 max_tokens=1 的最小消息；不跟随重定向（3xx 直接拒绝，不发第二次请求）；
+    发一条 max_tokens=16 的最小消息；不跟随重定向（3xx 直接拒绝，不发第二次请求）；
     成功时也不读正文，服务器原文、地址和 Key 都不会出现在返回值里。
     """
     if not _is_configured(cfg):

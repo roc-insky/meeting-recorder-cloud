@@ -170,6 +170,18 @@ class StaticFilesTest(unittest.TestCase):
         self.assertRegex(css, r"@media\s*\(min-width:\s*1041px\)")
         self.assertIn("overflow-y: auto", css)
 
+    def test_history_actions_hidden_until_hover(self):
+        """历史会议的操作按钮默认隐藏：覆盖式布局、悬停 150ms/键盘聚焦才出现。"""
+        css = read("style.css")
+        js = read("app.js")
+        self.assertRegex(css, r"@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)")
+        self.assertRegex(css, r"#history-list \.hist-actions\s*\{[^}]*opacity:\s*0")
+        self.assertRegex(css, r"#history-list \.hist-actions\s*\{[^}]*pointer-events:\s*none")
+        self.assertIn("#history-list .hist-item.show-actions .hist-actions", css)
+        self.assertIn("HIST_ACTIONS_DELAY_MS = 150", js)
+        self.assertIn("class: 'hist-actions'", js)
+        self.assertIn("bindHistoryActions();", js)
+
     def test_urls_use_encodeuricomponent(self):
         """所有 '/api/…' + 动态片段 的拼接，动态片段都必须包在 encodeURIComponent( 里。"""
         total = 0
@@ -284,6 +296,25 @@ class StaticFilesTest(unittest.TestCase):
         self.assertEqual(out["afterCreateSame"], {"currentId": "NEW2"})
         # 场景 4：删除期间切到 B，不得重置 B 的表单
         self.assertEqual(out["afterDeleteSwitch"], {"currentId": "B", "title": "职位B"})
+
+    @unittest.skipUnless(shutil.which("node"), "需要 node")
+    def test_history_hover_runs_real_app_js(self):
+        """在 node vm 里执行真实的 app.js（假 DOM）：悬停 150ms 才显示，键盘聚焦立即显示。"""
+        harness = Path(__file__).resolve().parent / "history_hover_harness.js"
+        res = subprocess.run(["node", str(harness)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = json.loads(res.stdout)
+        self.assertEqual(out["delayMs"], 150)
+        self.assertFalse(out["beforeDelay"])            # 鼠标刚进入：不显示
+        self.assertTrue(out["afterDelay"])              # 停留 150ms：显示
+        self.assertFalse(out["roamInsideOpenedTimer"])  # 行内移动不重开定时器
+        self.assertTrue(out["keepInside"])              # 停在行内其它元素上不消失
+        self.assertFalse(out["hideOnLeave"])            # 移出整行：立即消失
+        self.assertTrue(out["focusShows"])              # 键盘聚焦：立即显示
+        self.assertFalse(out["focusOpenedTimer"])
+        self.assertFalse(out["focusHides"])             # 焦点移出：消失
+        self.assertTrue(out["clickFocusDoesNotShow"])   # 鼠标点击标题不留按钮
+        self.assertTrue(out["cancelledTimerStaysHidden"])  # 移出后定时器被取消
 
 
 if __name__ == "__main__":

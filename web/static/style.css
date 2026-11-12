@@ -42,6 +42,8 @@ fieldset { border: 0; padding: 0; margin: 0 0 8px; }
 legend { font-size: 13px; color: var(--muted); padding: 0; margin-bottom: 3px; }
 .hint { color: var(--muted); font-size: 13px; margin: 6px 0; }
 .note { margin: 6px 0; padding: 6px 10px; background: #fff7e6; border: 1px solid #f0d9a8; border-radius: 6px; font-size: 13px; }
+.live-status { margin: 6px 0; font-size: 13px; color: var(--muted); }
+.live-status.warn { color: #a15c00; }
 .field { margin-bottom: 10px; }
 .inline { display: flex; gap: 6px; }
 .inline input { flex: 1; }
@@ -104,6 +106,23 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .hist-item.no-text .hist-title { color: var(--muted); }
 .hist-item button.small { padding: 2px 6px; font-size: 12px; }
 
+/* 历史会议：操作按钮默认隐藏，鼠标停留或键盘聚焦时覆盖在行尾出现。
+   只在支持悬停的设备上生效；触屏保持原样（按钮排在行内、常显）。 */
+#history-list .hist-actions { display: flex; align-items: center; gap: 4px; }
+@media (hover: hover) and (pointer: fine) {
+  #history-list .hist-item { position: relative; }
+  #history-list .hist-actions {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    padding-left: 12px;
+    background: linear-gradient(to right, rgba(255, 255, 255, 0), #fff 12px);
+    opacity: 0; pointer-events: none; transition: opacity .12s ease;
+  }
+  #history-list .hist-item.current .hist-actions {
+    background: linear-gradient(to right, rgba(232, 240, 254, 0), #e8f0fe 12px);
+  }
+  #history-list .hist-item.show-actions .hist-actions { opacity: 1; pointer-events: auto; }
+}
+
 .controls { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 8px; }
 .control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .control-row input[type="number"] { width: 80px; }
@@ -158,4 +177,5 @@ progress { width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .line.flash, .ann-list li.flash { animation: none; }
   .level-bar { transition: none; }
+  #history-list .hist-actions { transition: none; }
 }

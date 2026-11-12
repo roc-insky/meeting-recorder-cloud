@@ -7,7 +7,11 @@ __pycache__/
 # 本地工具与草稿（不入库）
 .omc/
 .superpowers/
-docs/superpowers/plans/*.progress.md
+docs/
+.memsearch/
+
+# 本机配置（含 API Key，只放本机）
+config.toml
 
 # 真实会议评估数据（含隐私，只放本机）
 eval/

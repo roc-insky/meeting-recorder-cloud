@@ -51,6 +51,47 @@ class TranscribeSamplesTest(unittest.TestCase):
         self.assertEqual(segs[0]["text"], " 你好")
 
 
+class SimplifiedChineseTest(unittest.TestCase):
+    """模型输出的繁体统一转简体；英文原样；转码失败退回原文，整场只警告一次。"""
+
+    def setUp(self):
+        self._prev_warned = transcribe._simplify_warned
+        transcribe._simplify_warned = False
+
+    def tearDown(self):
+        transcribe._simplify_warned = self._prev_warned
+
+    @staticmethod
+    def fake(text):
+        return lambda audio, **kw: {"segments": [{"start": 0.0, "end": 1.0, "text": text}]}
+
+    def run_fake(self, text):
+        segs = transcribe.transcribe_samples(np.zeros(16000, dtype=np.float32), transcribe_fn=self.fake(text))
+        return segs[0]["text"]
+
+    def test_traditional_to_simplified(self):
+        self.assertEqual(self.run_fake(" 這是我在說話"), " 这是我在说话")
+
+    def test_taiwan_words_localized(self):
+        self.assertEqual(self.run_fake(" 網路和軟體"), " 网络和软件")
+
+    def test_english_kept(self):
+        self.assertEqual(self.run_fake(" We need to ship the MVP by Friday."), " We need to ship the MVP by Friday.")
+
+    def test_mixed_kept(self):
+        self.assertEqual(self.run_fake(" 這個專案 mixed English 討論"), " 这个专案 mixed English 讨论")
+
+    def test_conversion_failure_keeps_text_and_warns_once(self):
+        err = io.StringIO()
+        with mock.patch.object(transcribe.zhconv, "convert", side_effect=RuntimeError("坏了")), \
+                contextlib.redirect_stderr(err):
+            first = self.run_fake(" 這是原文")
+            second = self.run_fake(" 這是原文")
+        self.assertEqual(first, " 這是原文")
+        self.assertEqual(second, " 這是原文")
+        self.assertEqual(err.getvalue().count("繁简转换失败"), 1)
+
+
 class FilterTest(unittest.TestCase):
     def test_filter_drops_empty_and_nospeech(self):
         segs = [
@@ -192,6 +233,13 @@ class TranscribeWavTest(unittest.TestCase):
         fake = lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": "你好", "no_speech_prob": 0.0}]}
         out = transcribe.transcribe_wav(wav, model="m", speakers=None, diarize=False, deps={"transcribe_fn": fake})
         self.assertIn("[00:00:00] 你好", out)
+
+    def test_transcript_is_simplified(self):
+        wav = self.dir / "meeting.wav"
+        write_wav(wav, tone(2.0))
+        fake = lambda audio, **kw: {"segments": [{"start": 0.5, "end": 1.5, "text": " 這是我在說話", "no_speech_prob": 0.0}]}
+        out = transcribe.transcribe_wav(wav, model="m", speakers=None, diarize=False, deps={"transcribe_fn": fake})
+        self.assertIn("[00:00:00] 这是我在说话", out)
 
     def test_diarize_hook_labels_speakers(self):
         wav = self.dir / "meeting.wav"

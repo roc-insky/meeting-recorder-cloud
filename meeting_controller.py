@@ -11,6 +11,10 @@
   live_factory(meeting_dir, on_text) -> 会话（可选）
       start(live=True) 时调用，返回带 feed(samples) / finish() 的对象；
       on_text(start_s, text) 会产生 live_text 事件。真实实现见 build_live_factory。
+  live_warmup() -> None（可选）
+      warm_live() 在后台线程里调用它预热模型（检查/下载 VAD、加载 ASR），结果写进
+      快照的 live_state：unavailable（没装实时转写）/ idle / warming / ready / failed。
+      真实实现见 build_live_warmup；没有配置实时转写时 warm_live() 返回 False。
 
 忙碌规则（一次只做一件事，违反抛 Busy 的子类，Web 层映射为 409）：
   - 正在录音或停止收尾中 → 不能再开始录音；
@@ -85,7 +89,7 @@ def _validate_speakers(speakers) -> Optional[int]:
 
 class MeetingController:
     def __init__(self, root, *, record_fn, transcribe_fn, clock=time.monotonic,
-                 live_factory=None, history_max: int = HISTORY_MAX,
+                 live_factory=None, live_warmup=None, history_max: int = HISTORY_MAX,
                  start_timeout: float = START_TIMEOUT_S,
                  live_init_timeout: float = LIVE_INIT_TIMEOUT_S):
         self._root = Path(root)
@@ -93,6 +97,7 @@ class MeetingController:
         self._transcribe_fn = transcribe_fn
         self._clock = clock
         self._live_factory = live_factory
+        self._live_warmup = live_warmup
         self._history_max = max(1, int(history_max))
         self._start_timeout = start_timeout
         self._live_init_timeout = live_init_timeout
@@ -112,6 +117,9 @@ class MeetingController:
         self._level = 0.0
         self._last_error: Optional[str] = None
         self._live_on = False
+        self._live_state = "idle" if live_factory is not None else "unavailable"
+        self._live_error: Optional[str] = None
+        self._live_warm_thread: Optional[threading.Thread] = None
         self._live_session = None
         self._live_warned = False
         self._live_gen = 0                    # 每场录音/收尾加一；初始化线程用它判断自己是否已过期
@@ -214,6 +222,8 @@ class MeetingController:
             "elapsed": self._elapsed_locked(),
             "level": self._level,
             "live": self._live_on,
+            "live_state": self._live_state,
+            "live_error": self._live_error,
             "error": self._last_error,
         }
 
@@ -428,6 +438,42 @@ class MeetingController:
     def _on_live_text(self, start_s: float, text: str) -> None:
         self._emit("live_text", {"t": start_s, "text": text})
 
+    # ---------- 预热 ----------
+    def warm_live(self) -> bool:
+        """后台预热实时转写（检查/下载 VAD 模型、加载 ASR 模型并跑一次极短推理）。
+
+        mlx-whisper 首次加载权重的冷启动约 1 分钟；放在服务启动时做，开始录音后的
+        第一句就不用再等。未配置预热或已在预热/已就绪时返回 False。预热只影响
+        live_state，不阻塞录音，也不影响录音成败。
+        """
+        with self._cond:
+            if self._live_factory is None or self._live_warmup is None:
+                return False
+            if self._live_state in ("warming", "ready"):
+                return False
+            self._live_state = "warming"
+            self._live_error = None
+            self._emit_state_locked()
+            t = threading.Thread(target=self._live_warm_main, name="mr-live-warm", daemon=True)
+            self._live_warm_thread = t
+            t.start()
+            return True
+
+    def _live_warm_main(self) -> None:
+        error = None
+        try:
+            self._live_warmup()
+        except Exception as e:  # noqa: BLE001 预热失败只降级为“实时转写不可用”
+            error = str(e) or e.__class__.__name__
+        with self._cond:
+            if error is None:
+                self._live_state = "ready"
+            else:
+                self._live_state = "failed"
+                self._live_error = error
+                self._emit_locked("warning", {"message": f"实时转写预热失败（{error}）；录音不受影响"})
+            self._emit_state_locked()
+
     def _on_level(self, rms: float) -> None:
         with self._cond:
             self._level = float(rms)
@@ -472,6 +518,7 @@ class MeetingController:
             self._elapsed_end = self._clock()
             self._recording = False
             self._stopping = False
+            self._live_on = False              # 快照里的“实时转写”只描述当前这场录音
             self._live_session = None
             self._level = 0.0
             if error is not None:
@@ -537,6 +584,10 @@ class MeetingController:
         with self._cond:
             t2 = self._transcribe_thread
             t3 = self._live_init_thread
+            t4 = self._live_warm_thread
+        if t4 is not None and t4 is not threading.current_thread():
+            # 预热线程是守护线程；模型加载可能很久，只做有上限的等待，绝不影响退出
+            t4.join(min(LIVE_INIT_JOIN_S, max(0.0, deadline - time.monotonic())))
         if t3 is not None and t3 is not threading.current_thread():
             # 实时初始化线程是守护线程且已被作废；只做有上限的等待，卡住也不影响退出
             t3.join(min(LIVE_INIT_JOIN_S, max(0.0, deadline - time.monotonic())))
@@ -607,6 +658,27 @@ class _EventSink(live.LiveSink):
             self._on_text(start_s, text)
         except Exception:  # noqa: BLE001
             pass
+
+
+def build_live_warmup(*, deps=None, model: str = transcribe.DEFAULT_MODEL, stderr=None):
+    """返回实时转写的预热函数：先确保 VAD 模型可用，再加载 ASR 模型并跑一次极短推理。
+
+    实测 mlx-whisper 首次调用约 77 秒（加载 1.6GB 权重 + 首次推理），之后每句不到 1 秒。
+    服务启动时在后台跑一次，实时字幕才来得及在说话时就出现。
+    """
+    deps = dict(deps or {})
+    stderr = stderr if stderr is not None else io.StringIO()
+
+    def warmup() -> None:
+        segmenter = record._prepare_segmenter(deps, stderr)
+        if segmenter is None:
+            raise RuntimeError("实时转写所需的 VAD 模型不可用")
+        import numpy as np
+
+        transcribe.transcribe_samples(
+            np.zeros(16000, dtype=np.float32), model=model,
+            transcribe_fn=deps.get("live_transcribe_fn"))
+    return warmup
 
 
 def build_live_factory(*, deps=None, model: str = transcribe.DEFAULT_MODEL, stderr=None):

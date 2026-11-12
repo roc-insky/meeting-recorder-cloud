@@ -185,7 +185,7 @@ class TestConnectionTests(unittest.TestCase):
         self.assertEqual(op.timeouts, [7])
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body["model"], "m-1")
-        self.assertEqual(body["max_tokens"], 1)
+        self.assertEqual(body["max_tokens"], 16)
         self.assertEqual(len(body["messages"]), 1)
         self.assertEqual(body["messages"][0]["role"], "user")
         self.assertIs(body.get("stream", False), False)

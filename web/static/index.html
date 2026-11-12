@@ -35,7 +35,7 @@
         <div class="control-row">
           <label for="speakers">当前会议人数</label>
           <input id="speakers" type="number" min="1" max="20" step="1" inputmode="numeric" placeholder="自动">
-          <label class="check"><input id="live-toggle" type="checkbox"> 实时转写</label>
+          <label class="check"><input id="live-toggle" type="checkbox" checked> 实时转写</label>
           <button type="button" id="btn-start" class="primary">开始录音</button>
           <button type="button" id="btn-stop" class="danger" disabled>停止录音</button>
         </div>
@@ -45,6 +45,7 @@
           <span id="final-status" class="status-pill final-idle">空闲</span>
           <div class="level" role="presentation"><div id="level-bar" class="level-bar"></div></div>
         </div>
+        <p id="live-status" class="live-status" role="status" hidden></p>
         <p id="final-note" class="note" role="status" hidden></p>
       </div>
       <h2 id="transcript-title" class="transcript-title">转写</h2>

@@ -7,13 +7,17 @@ deps 字典（均可选，便于测试与后续扩展，新增键不影响旧调
   stderr                                                   警告输出流，默认 sys.stderr
   started                                                  会议开始时间（datetime），默认由 wav 修改时间推算
   config_path                                              config.toml 路径，默认项目目录下的 config.toml（只读 [voiceprint] 阈值）
+
+模型输出在 transcribe_samples 出口统一转成简体中文（zhconv，zh-cn），英文原样保留。
 """
 import argparse
 import sys
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import zhconv
 
 import common
 import voiceprint
@@ -22,6 +26,7 @@ DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"   # 不存在也能跑，[voiceprint] 缺省用内置阈值
 NO_SPEECH_THRESHOLD = 0.6
 EMPTY_NOTE = "（未识别到语音）"
+SIMPLIFY_TARGET = "zh-cn"   # zh-cn 连台湾用词一起本地化（网路→网络）；zh-hans 只换字形
 
 # Segment：dict，键 start、end、text，可有 no_speech_prob
 # Turn：(起, 止, 说话人)，说话人为 int 或 str
@@ -29,17 +34,62 @@ Segment = dict
 Turn = tuple
 
 
+# mlx_whisper 的模型缓存（ModelHolder）不是线程安全的：并发调用会各自加载一遍 1.6GB 权重。
+# 实时转写与会后转写可能同时发生，串行化真实推理即可避免重复加载，也保证预热与首句不打架。
+_TRANSCRIBE_LOCK = threading.Lock()
+
+
+def resolve_model_path(model: str) -> str:
+    """本地已缓存的模型直接返回快照目录，避免每次转写都联网检查（网络差时能卡几分钟）。
+
+    没有完整缓存时原样返回仓库 id，交给 mlx-whisper 自己下载。
+    """
+    if Path(model).exists():
+        return model
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(repo_id=model, local_files_only=True)
+    except Exception:  # noqa: BLE001 没有缓存/离线库不可用：回退到让 mlx-whisper 自己处理
+        return model
+
+
 def _real_transcribe(audio, **kwargs):
     """真实转写：延迟导入 mlx_whisper，避免测试和导入时加载模型。"""
     import mlx_whisper
 
-    return mlx_whisper.transcribe(audio, **kwargs)
+    repo = kwargs.get("path_or_hf_repo")
+    if isinstance(repo, str) and repo:
+        kwargs["path_or_hf_repo"] = resolve_model_path(repo)
+    with _TRANSCRIBE_LOCK:
+        return mlx_whisper.transcribe(audio, **kwargs)
+
+
+_simplify_warned = False
+
+
+def to_simplified(text: str) -> str:
+    """把繁体中文转成简体，英文、数字和空白原样保留。
+
+    转码失败时保留原文并只警告一次：宁可字幕是繁体，也不能因为转换出错丢句子。
+    """
+    global _simplify_warned
+    if not text:
+        return text
+    try:
+        return zhconv.convert(text, SIMPLIFY_TARGET)
+    except Exception as e:  # noqa: BLE001 转码失败不影响转写
+        if not _simplify_warned:
+            _simplify_warned = True
+            print(f"警告：繁简转换失败，已保留原文（{e}）", file=sys.stderr)
+        return text
 
 
 def transcribe_samples(samples: np.ndarray, *, model: str = DEFAULT_MODEL, transcribe_fn=None) -> list:
-    """转写 16 kHz 单声道样本，返回原始片段列表。
+    """转写 16 kHz 单声道样本，返回原始片段列表（文本已转简体）。
 
-    固定中文、不依赖上一段文本，且不传 initial_prompt。
+    固定中文、不依赖上一段文本，且不传 initial_prompt；繁简在这里统一处理，
+    实时字幕、live.txt、会后 transcript.md、补转写都经过这个出口。
     """
     if samples.dtype.kind in "iu":
         audio = samples.astype(np.float32) / 32768.0
@@ -52,7 +102,12 @@ def transcribe_samples(samples: np.ndarray, *, model: str = DEFAULT_MODEL, trans
         language="zh",
         condition_on_previous_text=False,
     )
-    return list(result.get("segments", []))
+    segs = []
+    for seg in result.get("segments", []):
+        if "text" in seg:
+            seg = {**seg, "text": to_simplified(str(seg["text"]))}
+        segs.append(seg)
+    return segs
 
 
 def filter_segments(segs: list) -> list:

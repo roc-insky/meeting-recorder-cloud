@@ -103,7 +103,8 @@ async function busy(flightKey, buttons, fn) {
 
 // ---------- 状态 ----------
 const S = {
-  snap: { state: 'idle', stopping: false, final: 'idle', meeting_id: null, elapsed: 0, level: 0, live: false, error: null },
+  snap: { state: 'idle', stopping: false, final: 'idle', meeting_id: null, elapsed: 0, level: 0,
+          live: false, live_state: 'idle', live_error: null, error: null },
   vpBusy: false,
   viewId: null,          // 当前查看的会议 id
   title: '',
@@ -306,6 +307,8 @@ function meetingActive(id) {
 
 function renderHistory() {
   const list = $('history-list');
+  histHoverItem = null;              // 列表重建后旧行失效，悬停状态一并清掉
+  clearTimeout(histHoverTimer);
   const items = S.meetings.map((m) => {
     const active = meetingActive(m.id);
     const title = h('button', { type: 'button', class: 'hist-title', title: m.title });
@@ -325,6 +328,7 @@ function renderHistory() {
         text: '未完成',
       }));
     }
+    const actions = h('div', { class: 'hist-actions' });
     if (m.incomplete || m.has_transcript) {
       const force = !!m.has_transcript;
       const retry = h('button', {
@@ -334,14 +338,55 @@ function renderHistory() {
       });
       retry.textContent = force ? '重新转写' : '补转写';
       retry.addEventListener('click', () => retranscribeMeeting(m, retry, force));
-      parts.push(retry);
+      actions.append(retry);
     }
-    parts.push(edit, del);
+    actions.append(edit, del);
+    parts.push(actions);
     const cls = 'hist-item' + (m.id === S.viewId ? ' current' : '') + (m.has_transcript ? '' : ' no-text');
     return h('li', { class: cls }, parts);
   });
   list.replaceChildren(...items);
   $('history-empty').hidden = items.length > 0;
+}
+
+// ---------- 历史会议：操作按钮悬停/聚焦才显示 ----------
+const HIST_ACTIONS_DELAY_MS = 150;   // 鼠标停留多久才显示，避免扫过列表时按钮闪烁
+let histHoverTimer = null;
+let histHoverItem = null;
+
+/** 只认键盘焦点：鼠标点击标题后不该把按钮一直留在屏幕上。 */
+function historyFocusVisible(node) {
+  try { return node.matches(':focus-visible'); } catch (e) { return true; }
+}
+
+function bindHistoryActions() {
+  const list = $('history-list');
+  list.addEventListener('mouseover', (e) => {
+    const li = e.target.closest('.hist-item');
+    if (!li || li === histHoverItem) return;          // 行内移动不算重新进入
+    clearTimeout(histHoverTimer);
+    histHoverItem = li;
+    histHoverTimer = setTimeout(() => li.classList.add('show-actions'), HIST_ACTIONS_DELAY_MS);
+  });
+  list.addEventListener('mouseout', (e) => {
+    const li = e.target.closest('.hist-item');
+    if (!li || li !== histHoverItem) return;
+    if (e.relatedTarget && li.contains(e.relatedTarget)) return;
+    clearTimeout(histHoverTimer);
+    li.classList.remove('show-actions');
+    histHoverItem = null;
+  });
+  list.addEventListener('focusin', (e) => {
+    const li = e.target.closest('.hist-item');
+    if (!li || !historyFocusVisible(e.target)) return;
+    clearTimeout(histHoverTimer);
+    li.classList.add('show-actions');
+  });
+  list.addEventListener('focusout', (e) => {
+    const li = e.target.closest('.hist-item');
+    if (!li || (e.relatedTarget && li.contains(e.relatedTarget))) return;
+    li.classList.remove('show-actions');
+  });
 }
 
 async function renameMeeting(m, btn) {
@@ -519,6 +564,7 @@ function applySnapshot(snap) {
     $('level-bar').style.width = '0%';
   }
   renderStatus();
+  renderLiveStatus();
   renderHistory();
   refreshControls();
   updateTimer();
@@ -542,6 +588,57 @@ function renderStatus() {
     note.textContent = '';
     note.hidden = true;
   }
+}
+
+/** 实时转写状态行：让“准备中/不可用”永远可见，避免中栏一片空白让人以为坏了。 */
+function renderLiveStatus() {
+  const el = $('live-status');
+  const snap = S.snap;
+  const on = $('live-toggle').checked;
+  const recording = snap.state === 'recording';
+  let text = '';
+  let warn = false;
+  if (recording) {
+    if (!snap.live) {
+      text = '实时转写：本场未开启，只录音';
+    } else if (snap.live_state === 'warming') {
+      text = '实时转写：正在准备模型，稍后自动出字幕（录音不受影响）…';
+    } else if (snap.live_state === 'failed') {
+      text = '实时转写不可用：' + (snap.live_error || '模型加载失败') + '；录音继续，结束后仍会生成文字稿。';
+      warn = true;
+    } else {
+      text = '实时转写：进行中，字幕出现在下方。';
+    }
+  } else if (!on) {
+    text = '实时转写：未勾选，本场只录音（结束后生成文字稿）。';
+  } else if (snap.live_state === 'warming') {
+    text = '实时转写：正在后台准备模型（首次约 1 分钟），现在也可以开始录音。';
+  } else if (snap.live_state === 'ready') {
+    text = '实时转写：已就绪，开始录音后会实时显示字幕。';
+  } else if (snap.live_state === 'failed') {
+    text = '实时转写不可用：' + (snap.live_error || '模型加载失败') + '；录音和会后转写不受影响。';
+    warn = true;
+  } else if (snap.live_state === 'unavailable') {
+    text = '实时转写：当前环境未启用。';
+  } else {
+    text = '实时转写：模型尚未预热，开始录音后可能需要等待一会儿。';
+  }
+  el.textContent = text;
+  el.hidden = !text;
+  el.classList.toggle('warn', warn);
+}
+
+/** 勾选状态默认开启，并用 localStorage 记住上次选择（隐私模式等取不到就沿用默认值）。 */
+function initLiveToggle() {
+  const el = $('live-toggle');
+  try {
+    const saved = localStorage.getItem('mr.live');
+    if (saved === '1' || saved === '0') el.checked = saved === '1';
+  } catch (e) { /* 无法读取时保留 HTML 默认的勾选 */ }
+  el.addEventListener('change', () => {
+    try { localStorage.setItem('mr.live', el.checked ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    renderLiveStatus();
+  });
 }
 
 function updateTimer() {
@@ -989,10 +1086,12 @@ async function loadState() {
 function init() {
   initTabs();
   initKinds();
+  initLiveToggle();
   renderSpeakers();
   $('btn-start').addEventListener('click', startRecording);
   $('btn-stop').addEventListener('click', stopRecording);
   $('history-refresh').addEventListener('click', loadHistory);
+  bindHistoryActions();
   $('ann-form').addEventListener('submit', submitAnnotation);
   $('ann-now').addEventListener('click', () => { $('ann-time').value = String(currentElapsed()); });
   $('summary-submit').addEventListener('click', submitSummary);

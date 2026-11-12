@@ -496,6 +496,79 @@ class LiveTests(ControllerCase):
         self.wait_final(self.ctl, "completed")
 
 
+class LiveWarmupTests(ControllerCase):
+    """服务启动时的实时转写预热：状态可见，失败只降级、不影响录音。"""
+
+    class Session:
+        def __init__(self):
+            self.fed = 0
+            self.finished = False
+
+        def feed(self, samples):
+            self.fed += 1
+
+        def finish(self):
+            self.finished = True
+
+    def wait_state(self, ctl, want):
+        deadline = time.monotonic() + WAIT
+        while ctl.snapshot()["live_state"] != want and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return ctl.snapshot()["live_state"]
+
+    def test_no_factory_means_unavailable_and_no_warmup(self):
+        self.assertEqual(self.ctl.snapshot()["live_state"], "unavailable")
+        self.assertFalse(self.ctl.warm_live())
+
+    def test_warmup_runs_once_and_reports_ready(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def warmup():
+            calls.append(1)
+            started.set()
+            release.wait(WAIT)
+
+        ctl = self.make(live_factory=lambda d, on_text: self.Session(), live_warmup=warmup)
+        self.assertEqual(ctl.snapshot()["live_state"], "idle")
+        self.assertTrue(ctl.warm_live())
+        self.assertTrue(started.wait(WAIT))
+        self.assertEqual(ctl.snapshot()["live_state"], "warming")
+        self.assertFalse(ctl.warm_live())          # 预热中不重复启动
+        release.set()
+        self.assertEqual(self.wait_state(ctl, "ready"), "ready")
+        self.assertIsNone(ctl.snapshot()["live_error"])
+        self.assertFalse(ctl.warm_live())          # 已就绪也不再启动
+        self.assertEqual(calls, [1])
+
+    def test_warmup_failure_warns_but_recording_still_works(self):
+        def warmup():
+            raise RuntimeError("没有网络")
+
+        ctl = self.make(live_factory=lambda d, on_text: self.Session(), live_warmup=warmup)
+        ctl.warm_live()
+        self.assertEqual(self.wait_state(ctl, "failed"), "failed")
+        self.assertIn("没有网络", ctl.snapshot()["live_error"])
+        kinds = [e["type"] for e in self.drain(ctl)]
+        self.assertIn("warning", kinds)
+        self.assertNotIn("error", kinds)           # 预热失败不是录音错误
+        ctl.start(live=True)
+        self.assertTrue(self.rec.entered.wait(WAIT))
+        ctl.stop()
+        self.wait_final(ctl, "completed")
+        self.assertEqual(ctl.snapshot()["final"], "completed")
+
+    def test_live_flag_is_reset_after_recording(self):
+        """停止后快照里的 live 必须为 false，否则页面会以为下一场仍开着实时转写。"""
+        ctl = self.make(live_factory=lambda d, on_text: self.Session())
+        ctl.start(live=True)
+        self.assertTrue(ctl.snapshot()["live"])
+        ctl.stop()
+        self.wait_final(ctl, "completed")
+        self.assertFalse(ctl.snapshot()["live"])
+
+
 class SlowLiveInitTests(unittest.TestCase):
     """实时转写初始化很慢（下载/加载 VAD）时，不得拖住录音写盘、停止与退出（真实 record.record + 假流）。"""
 
