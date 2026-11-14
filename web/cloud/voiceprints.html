@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的声纹库</title>
+    <!-- 视觉草案，未获 G4 批准：本页仅落实可达性与真实状态，未进行视觉签收。 -->
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#voiceprints-root">跳到主要内容</a>
+    <header class="app-header">
+      <p class="brand">云端会议记录</p>
+      <nav class="app-nav" aria-label="主导航">
+        <a href="./index.html">当前会议</a>
+        <a href="./voiceprints.html" aria-current="page">声纹登记</a>
+      </nav>
+      <div id="account" class="account" aria-live="polite"></div>
+    </header>
+    <main id="voiceprints-root" class="voiceprints-root" tabindex="-1"></main>
+
+    <dialog
+      id="enroll-dialog"
+      class="dialog voiceprint-dialog"
+      data-testid="enroll-dialog"
+      aria-labelledby="enroll-title"
+    >
+      <form id="enroll-form" class="enroll-form" novalidate>
+        <h2 id="enroll-title" data-testid="enroll-title">登记声纹</h2>
+        <p class="field-hint">
+          录音仅用于提取本人声纹，只匹配你自己的会议记录；不会跨账号或平台匹配。
+        </p>
+        <div class="field">
+          <label for="enroll-name">姓名</label>
+          <input
+            id="enroll-name"
+            name="name"
+            type="text"
+            maxlength="100"
+            required
+            autocomplete="off"
+            data-testid="enroll-name"
+          />
+        </div>
+        <div class="field">
+          <label class="checkbox-row" for="enroll-consent">
+            <input id="enroll-consent" type="checkbox" data-testid="enroll-consent" />
+            <span>我同意将本次录音用于提取本人声纹，仅匹配我自己的会议记录。</span>
+          </label>
+        </div>
+        <p class="notice notice--blocking" data-testid="replace-warning" hidden></p>
+        <div class="field" data-testid="replace-confirm-field" hidden>
+          <label class="checkbox-row" for="replace-confirm">
+            <input id="replace-confirm" type="checkbox" data-testid="replace-confirm" />
+            <span data-testid="replace-confirm-label"></span>
+          </label>
+        </div>
+        <p class="record-line">
+          <span class="record-status" data-testid="record-status" role="status">未开始录音</span>
+          <span class="record-seconds" data-testid="record-seconds">00:00</span>
+        </p>
+        <p class="form-error" data-testid="enroll-error" role="alert" hidden></p>
+        <p class="form-status" data-testid="enroll-status" role="status"></p>
+        <p class="form-error" data-testid="enroll-conflict" role="alert" hidden>
+          <span data-testid="enroll-conflict-text"></span>
+          <button class="btn" type="button" data-testid="enroll-use-replace">改为替换现有版本</button>
+        </p>
+        <div class="dialog-actions">
+          <button class="btn" type="button" data-testid="enroll-cancel">取消</button>
+          <button class="btn btn--danger" type="button" data-testid="enroll-cancel-task" hidden>
+            取消处理
+          </button>
+          <button class="btn" type="button" data-testid="enroll-start">开始录音</button>
+          <button class="btn btn--primary" type="button" data-testid="enroll-save" disabled>
+            停止并保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog
+      id="revoke-dialog"
+      class="dialog voiceprint-dialog"
+      data-testid="revoke-dialog"
+      aria-labelledby="revoke-title"
+    >
+      <h2 id="revoke-title">撤销声纹？</h2>
+      <p>
+        将撤销声纹「<strong data-testid="revoke-name"></strong>」。撤销后新生成的记录不再使用它。
+      </p>
+      <p class="notice notice--blocking">
+        撤销只停止后续识别，不会自动改写已生成文字稿中的姓名；如需历史匿名化必须另行重跑。
+      </p>
+      <p class="form-error" data-testid="revoke-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="btn" type="button" data-testid="revoke-cancel">取消</button>
+        <button class="btn btn--danger" type="button" data-testid="revoke-confirm">确认撤销</button>
+      </div>
+    </dialog>
+
+    <script type="module">
+      import { mountVoiceprints } from "./voiceprints.mjs";
+      mountVoiceprints(document.getElementById("voiceprints-root"));
+    </script>
+  </body>
+</html>
