@@ -178,3 +178,34 @@ test("registered_system_track_without_chunks_needs_downgrade", async () => {
   assert.equal(manifest.accept_partial, true);
   assert.equal(sealed.seal.status, "partial");
 });
+
+test("downgraded_dual_never_reports_complete_even_if_server_does", async () => {
+  const env = await makeEnv({ display: null });
+  // The server never knew a system track existed, so it can only answer
+  // "complete" for the microphone manifest. The client downgraded, so it knows
+  // the recording is not complete dual and must not repeat the server verbatim.
+  env.transport.sealResponse = { status: "complete", input_version: 3, gaps: [] };
+
+  await env.session.start();
+  env.clock.advance(3000);
+  env.devices.recorders[0].emitData(new Uint8Array([1, 2, 3, 4]));
+  await waitForAcks(env, 1);
+
+  const first = await env.session.stop();
+  assert.equal(first.status, "downgrade_confirmation_required");
+
+  const sealed = await env.session.stop({ confirmDowngrade: true });
+  assert.equal(sealed.seal.status, "partial", "a downgraded dual is never complete");
+  assert.equal(sealed.seal.input_version, 3, "the server version is still trusted");
+  assert.deepEqual(sealed.seal.gaps, [
+    {
+      track_id: "system",
+      start_ms: 0,
+      end_ms: 3000,
+      reason: "missing_track",
+    },
+  ]);
+  assert.equal(sealed.upload.state, "partial");
+  assert.equal(sealed.upload.warning.code, "recording_gap");
+  assert.deepEqual(sealed.upload.warning.gaps, sealed.seal.gaps);
+});

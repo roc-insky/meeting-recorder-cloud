@@ -10,6 +10,23 @@ import { QUOTA_LIMITS, evaluateQuota } from "./buffer.mjs";
 const LOGGED_OUT = "logged_out";
 const ACTIVE = "active";
 
+// A local downgrade is evidence the server may not have: when the system track
+// was never registered, the server can only answer "complete" for the mic
+// manifest. Keep the locally known gap and never lose it to a server verb.
+function mergeSealGaps(...groups) {
+  const merged = new Map();
+  for (const group of groups) {
+    for (const gap of group ?? []) {
+      if (!gap || typeof gap.track_id !== "string") continue;
+      merged.set(
+        `${gap.track_id}|${gap.start_ms}|${gap.end_ms}|${gap.reason}`,
+        { ...gap },
+      );
+    }
+  }
+  return [...merged.values()];
+}
+
 export class RecordingSession {
   constructor(options = {}) {
     const {
@@ -248,10 +265,19 @@ export class RecordingSession {
         tracks,
         accept_partial: Boolean(gap) || Boolean(this.downgrade),
       });
+      const localGap = this.downgrade?.gap ?? gap ?? null;
+      const downgradedSeal = Boolean(this.downgrade) || Boolean(gap);
+      const serverGaps = Array.isArray(result?.gaps)
+        ? result.gaps.map((item) => ({ ...item }))
+        : [];
       this.seal = {
-        status: result?.status === "complete" ? "complete" : "partial",
+        // The client's confirmed downgrade outranks a server that never knew a
+        // second track existed: a dual capture that lost system audio is
+        // partial, with the local gap preserved, even if the server says
+        // complete for the microphone-only manifest.
+        status: downgradedSeal ? "partial" : result?.status === "complete" ? "complete" : "partial",
         input_version: Number.isFinite(result?.input_version) ? result.input_version : 0,
-        gaps: Array.isArray(result?.gaps) ? result.gaps.map((item) => ({ ...item })) : [],
+        gaps: mergeSealGaps(serverGaps, localGap ? [localGap] : []),
       };
       this.sealError = null;
       this.setUploadState(this.seal.status === "complete" ? "complete" : "partial");
