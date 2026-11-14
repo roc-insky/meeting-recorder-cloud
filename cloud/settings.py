@@ -54,6 +54,17 @@ class Settings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8300, ge=1, le=65535)
 
+    # -- deployment readiness (Task 17) -----------------------------------
+    #: Local, operator-provided model manifest. Unset means the readiness
+    #: probe reports "model: false"; nothing is ever downloaded to satisfy it.
+    model_manifest_path: str | None = None
+    #: Directory that manifest file entries are relative to. Unset means the
+    #: manifest's own directory. Only local bytes are ever verified.
+    model_cache_dir: str | None = None
+    #: Proxy hops whose X-Forwarded-For/Proto headers uvicorn may trust.
+    #: A wildcard is refused: the API only ever sees the TLS proxy.
+    forwarded_allow_ips: str = "127.0.0.1"
+
     # -- candidate budgets (plan line 55) ---------------------------------
     chunk_target_ms: int = Field(default=3000, gt=0)
     saved_lag_target_ms: int = Field(default=10000, gt=0)
@@ -148,6 +159,18 @@ class Settings(BaseModel):
         if not value.strip():
             raise ValueError("secret_key must not be blank")
         return value
+
+    @field_validator("forwarded_allow_ips")
+    @classmethod
+    def _forwarded_allow_ips_is_a_list(cls, value: str) -> str:
+        entries = [item.strip() for item in value.split(",")]
+        if not entries or any(not item for item in entries):
+            raise ValueError(
+                "forwarded_allow_ips must be a non-empty comma-separated list"
+            )
+        if "*" in entries:
+            raise ValueError("forwarded_allow_ips must not trust every peer")
+        return ",".join(entries)
 
     @field_validator("ai_provider")
     @classmethod
@@ -254,6 +277,11 @@ class Settings(BaseModel):
             public_base_url=env.get("CLOUD_PUBLIC_BASE_URL") or None,
             host=env.get("CLOUD_HOST", "127.0.0.1"),
             port=int(env.get("CLOUD_PORT", "8300")),
+            model_manifest_path=env.get("CLOUD_MODEL_MANIFEST") or None,
+            model_cache_dir=env.get("CLOUD_MODEL_CACHE") or None,
+            forwarded_allow_ips=env.get(
+                "CLOUD_FORWARDED_ALLOW_IPS", "127.0.0.1"
+            ),
             privacy_audit_path=env.get("CLOUD_PRIVACY_AUDIT_PATH") or None,
             account_revocation_wait_s=int(
                 env.get("CLOUD_ACCOUNT_REVOCATION_WAIT_S", "604800")

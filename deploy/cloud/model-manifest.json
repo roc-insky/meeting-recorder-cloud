@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "status": "blocked_no_approved_engine",
+  "models": [],
+  "note": "Task 3 model contract is not_measured: no ASR/diarization/embedding engine, weights, license or checksum has been selected. warm_models() refuses an empty manifest, so model readiness stays false. Replace only with measured, licensed weights after G0/G1 approval."
+}

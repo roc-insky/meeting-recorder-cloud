@@ -12,15 +12,22 @@ process_once path in tests, so no background thread is started at import time.
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import sys
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
 from cloud import limits, observability
 from cloud.contracts import AuthContext, ClaimedTask, NotFoundError, TranscriptView
+from cloud.db import create_database_engine, make_session_factory
+from cloud.health import ModelWarmupError, readiness, warm_models
+from cloud.objects import object_store_from_env
 from cloud.settings import Settings
 from cloud.tasks import claim_task, fail_task, publish_result, read_claimed_task
 
@@ -262,3 +269,89 @@ def run_forever(
         )
         if not worked:
             time.sleep(poll_seconds)
+
+
+def _worker_clock() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    processor: Callable[[WorkItem], TranscriptView] | None = None,
+) -> int:
+    """Independent worker process entrypoint.
+
+    ``--check`` prints the same four readiness booleans as the API health
+    route and succeeds only when all of them are true. A normal start refuses
+    an unvalidated deployment, verifies the mounted model bytes, and then
+    polls only when a real processor was injected. Without one it exits 2
+    with the fixed code "worker_processor_not_configured" instead of
+    pretending to process audio. Nothing here downloads a model or imports a
+    macOS audio/MLX stack.
+    """
+    parser = argparse.ArgumentParser(
+        prog="cloud.worker",
+        description="Cloud recorder processing worker (no engine bundled).",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="print the four readiness booleans and exit 0 only if all are true",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        settings = Settings.from_env()
+    except Exception:
+        print("worker_settings_invalid", file=sys.stderr)
+        return 2
+
+    if args.check:
+        engine = create_database_engine(settings)
+        try:
+            values = readiness(
+                settings,
+                make_session_factory(engine),
+                object_store_from_env(os.environ),
+            )
+        finally:
+            engine.dispose()
+        print(json.dumps(values, sort_keys=True))
+        return 0 if all(values.values()) else 1
+
+    try:
+        settings.validate_for_startup()
+    except RuntimeError:
+        print("worker_settings_invalid", file=sys.stderr)
+        return 2
+
+    manifest = settings.model_manifest_path
+    if not manifest:
+        print("worker_model_not_ready", file=sys.stderr)
+        return 1
+    try:
+        warm_models(manifest, cache_dir=settings.model_cache_dir)
+    except ModelWarmupError:
+        print("worker_model_not_ready", file=sys.stderr)
+        return 1
+
+    if processor is None:
+        print("worker_processor_not_configured", file=sys.stderr)
+        return 2
+
+    engine = create_database_engine(settings)
+    try:
+        run_forever(
+            processor,
+            worker_id=f"worker-{os.getpid()}",
+            db=make_session_factory(engine)(),
+            settings=settings,
+            clock=_worker_clock,
+        )
+    finally:
+        engine.dispose()
+
+
+if __name__ == "__main__":  # pragma: no cover - process entrypoint
+    raise SystemExit(main())

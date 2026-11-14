@@ -1,3 +1,8 @@
+# Pinned Linux deployment set for deploy/cloud/Dockerfile.api and
+# deploy/cloud/Dockerfile.worker. Deliberately excludes MLX, mlx-whisper,
+# sounddevice and any audio-device binding: the cloud service never records
+# or transcribes from server hardware. It also excludes dev/test tooling.
+# Not yet installed on Linux - no image was built (Docker unavailable).
 alembic==1.20.1
 annotated-doc==0.0.6
 annotated-types==0.8.0

@@ -22,6 +22,7 @@ from cloud import (
     annotations,
     auth,
     events,
+    health,
     leases,
     meetings,
     observability,
@@ -360,6 +361,7 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
 
     app.add_middleware(RequestIdMiddleware)
 
+    app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(meetings.router)
     app.include_router(privacy.router)

@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+#
+# Linux-only API image for the cloud meeting recorder (Task 17).
+#
+# AUTHORED ONLY: this image has never been built or started. Docker is
+# unavailable on the macOS worktree (ruling R3), so a Linux build, container
+# start and HEALTHCHECK result are all not_run. The base tag may drift; pin a
+# digest at build time for a reproducible deployment.
+#
+# No model weights, no secret and no development dependency is baked in.
+# The image installs requirements-cloud.lock only. It must never install
+# mlx-whisper, sounddevice or any MLX package: those are macOS-local and are
+# not part of the cloud deployment.
+
+FROM python:3.12-slim-bookworm
+
+# Required and intentionally without a default: an operator must name the
+# exact FFmpeg package version their repository provides. The build fails
+# closed when it is empty instead of silently installing an unverified build.
+ARG FFMPEG_VERSION
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN test -n "${FFMPEG_VERSION}" \
+    || { echo >&2 "FFMPEG_VERSION build arg is required"; exit 1; }
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends "ffmpeg=${FFMPEG_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements-cloud.lock ./requirements-cloud.lock
+RUN pip install --requirement requirements-cloud.lock
+
+COPY alembic.ini ./alembic.ini
+COPY cloud ./cloud
+
+# Non-root, no login shell. /var/lib/cloud holds the append-only privacy
+# tombstone audit; a named volume mounted there inherits this ownership.
+RUN useradd --system --uid 10001 --no-create-home \
+        --shell /usr/sbin/nologin cloud \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/cloud
+
+USER 10001
+
+EXPOSE 8300
+
+# 200 is healthy even while model readiness is false (authorized uploads do
+# not need an engine); a connection error or 503 is unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8300/api/cloud/health', timeout=4)"]
+
+CMD ["python", "-m", "cloud.main"]
