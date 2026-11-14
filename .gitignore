@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-cloud/
+node_modules/
+test-results/
 
 # 本地工具与草稿（不入库）
 .omc/
