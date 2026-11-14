@@ -179,6 +179,10 @@ class LocalObjectStore:
         #: Bytes that must stay free after every write; public for health checks.
         self.min_free_bytes = min_free_bytes
         self.temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir's mode is masked by the umask; the deploy expects 0750 on the
+        # root and a private staging directory even if .tmp already existed.
+        os.chmod(self.root, 0o750)
+        os.chmod(self.temp_dir, 0o700)
 
     @property
     def temp_dir(self) -> Path:
@@ -222,35 +226,35 @@ class LocalObjectStore:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _fsync_dir(self, directory: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(directory, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _fsync_parents(self, leaf: Path) -> None:
+        """fsync ``leaf`` and every ancestor up to and including ``self.root``."""
+        for directory in (leaf, *leaf.parents):
+            self._fsync_dir(directory)
+            if directory == self.root:
+                return
+
     def _publish(self, stage: Path, target: Path, expected: int) -> None:
         if stage.stat().st_size != expected:
             raise ObjectStoreError("object_size_mismatch")
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
         os.replace(stage, target)
         os.chmod(target, 0o640)
-        # fsync the directory too, so the rename itself survives a crash.
-        fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        # The rename is durable only once every directory entry from the leaf up
+        # to the root has reached disk: the new name in the leaf directory and
+        # each ancestor directory created for a first write under a key.
+        self._fsync_parents(target.parent)
 
-    def _map_write_error(self, exc: OSError, needed: int = 0) -> CloudError:
-        """Map a failed write: a full disk is a 507, every other failure a 500.
-
-        ``ENOSPC``/``EDQUOT`` are the direct signal, even when the free-space
-        probe just before the write still saw room (the disk can fill in
-        between). A write that failed for another reason while the reserve is
-        now actually breached is still a full disk. ``exc`` also keeps this
-        helper callable from the read path.
-        """
+    def _map_write_error(self, exc: OSError) -> CloudError:
+        """Map a failed write: a full disk is a 507, every other failure a 500."""
         if exc.errno in (errno.ENOSPC, errno.EDQUOT):
-            return StorageFullError("disk_full")
-        try:
-            free = self.available_bytes()
-        except ObjectStoreError:
-            return ObjectStoreError("write_failed")
-        if free < needed + self.min_free_bytes:
             return StorageFullError("disk_full")
         return ObjectStoreError("write_failed")
 
@@ -271,7 +275,7 @@ class LocalObjectStore:
             raise
         except OSError as exc:
             stage.unlink(missing_ok=True)
-            raise self._map_write_error(exc, len(body)) from exc
+            raise self._map_write_error(exc) from exc
 
     def put_file_verified(
         self,
@@ -310,7 +314,7 @@ class LocalObjectStore:
             raise
         except OSError as exc:
             stage.unlink(missing_ok=True)
-            raise self._map_write_error(exc, size) from exc
+            raise self._map_write_error(exc) from exc
         return size
 
 

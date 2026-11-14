@@ -61,6 +61,16 @@ class WriteTests(LocalStoreCase):
                 self.store.put_verified(key, b"x", sha(b"x"))
         self.assertFalse((self.root.parent / "escape").exists())
 
+    def test_put_rejects_symlinked_parent_escape(self) -> None:
+        outside = Path(tempfile.mkdtemp(prefix="objects-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (self.root / "linked").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(ObjectStoreError) as raised:
+            self.store.put_verified("linked/object.bin", b"frames", sha(b"frames"))
+        # ObjectStoreError keeps its fixed wire code; the message names the branch.
+        self.assertEqual(str(raised.exception), "invalid_object_key")
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_put_rejects_bad_checksum_and_empty_body(self) -> None:
         with self.assertRaises(ObjectStoreError):
             self.store.put_verified(self.KEY, b"x", "0" * 64)
