@@ -241,6 +241,23 @@ class AudioCase(CloudCase):
         )
         return int(response.json()["input_version"])
 
+    def seal_manifest(
+        self,
+        client: Any,
+        upload_id: str,
+        tracks: list[dict[str, Any]],
+        *,
+        accept_partial: bool = False,
+    ) -> int:
+        response = self.expect(
+            client.post(
+                f"/api/cloud/uploads/{upload_id}/seal",
+                json={"tracks": tracks, "accept_partial": accept_partial},
+                headers=self.csrf_headers(client),
+            )
+        )
+        return int(response.json()["input_version"])
+
     def record_two_epochs(self, client: Any) -> tuple[str, int]:
         """One mic track recorded 0-30 s, interrupted, resumed at 60-90 s."""
         meeting_id, upload_id, headers = self.open_upload(client)
@@ -424,6 +441,54 @@ class AudioCase(CloudCase):
                          sorted([prepared.mix_path.name] + [
                              path.name for path in prepared.tracks.values()
                          ]))
+
+    def test_pads_timeline_to_explicit_tail_gap(self) -> None:
+        meeting_id, upload_id, headers = self.open_upload(self.a, mode="dual")
+        self.register_epoch(
+            self.a,
+            upload_id,
+            headers,
+            "e1",
+            offset_ms=0,
+            tracks=[dict(MIC), dict(SYSTEM)],
+        )
+        self.put_track(
+            self.a, upload_id, headers, "e1", "mic", self.webm_low, start_ms=0
+        )
+        # The client claims 30 s of mic missing chunks and a track that never
+        # produced any chunk; both become durable seal gaps out to 60 s.
+        version = self.seal_manifest(
+            self.a,
+            upload_id,
+            [
+                {
+                    "capture_epoch_id": "e1",
+                    "track_id": "mic",
+                    "last_sequence": 3,
+                    "end_ms": 60000,
+                },
+                {
+                    "capture_epoch_id": "e1",
+                    "track_id": "system",
+                    "last_sequence": -1,
+                    "end_ms": 0,
+                },
+            ],
+            accept_partial=True,
+        )
+
+        prepared, _ = self.prepare(self.a_user_id, meeting_id, version)
+        rate, channels, width, frames, _ = self.read_wav(prepared.mix_path)
+        self.assertEqual((rate, channels, width), (WORK_RATE, 1, 2))
+        self.assertEqual(frames, 60 * WORK_RATE)
+        self.assertEqual(set(prepared.tracks), {"mic"})
+        self.assertEqual(self.read_wav(prepared.tracks["mic"])[3], 60 * WORK_RATE)
+
+        tail = [gap for gap in prepared.gaps if gap.track_id == "system"]
+        self.assertEqual(
+            [(gap.start_ms, gap.end_ms, gap.reason) for gap in tail],
+            [(0, 60000, "missing_track")],
+        )
 
     def test_private_range(self) -> None:
         meeting_id, version = self.record_one_epoch(self.a)

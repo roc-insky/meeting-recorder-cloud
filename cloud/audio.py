@@ -367,9 +367,14 @@ def _plan(db: Any, ctx: AuthContext, upload: UploadSession) -> _Plan:
             gaps.append(Gap(**raw))
         except (TypeError, ValueError):
             continue
+    gaps = _dedupe(gaps)
+    # A durable tail gap (for example a track missing from the whole epoch)
+    # still belongs to the recorded timeline: pad to its end so the mix and
+    # every track WAV keep the duration downstream ASR intervals refer to.
+    duration_ms = max(duration_ms, max((gap.end_ms for gap in gaps), default=0))
     return _Plan(
         spans=spans,
-        gaps=_dedupe(gaps),
+        gaps=gaps,
         duration_ms=duration_ms,
         track_ids=track_ids,
         input_bytes=input_bytes,
