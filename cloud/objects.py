@@ -12,13 +12,15 @@ afterwards; a failed write raises ``ObjectStoreError``, which the API maps to a
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import io
 import os
 import re
+import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
@@ -36,6 +38,10 @@ _SEQUENCE_WIDTH = 10
 _MISSING_CODES = frozenset({"NoSuchKey", "NoSuchBucket", "NoSuchObject"})
 #: Upper bound on one streamed read, so a response never buffers a whole file.
 STREAM_BLOCK_BYTES = 64 * 1024
+_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
+_KEY_MAX_CHARS = 1024
+_TEMP_DIRNAME = ".tmp"
+_DEFAULT_MIN_FREE_BYTES = 1024 ** 3
 
 
 class ObjectStoreError(CloudError):
@@ -46,6 +52,16 @@ class ObjectStoreError(CloudError):
 
     def __init__(self, message: str = "object store operation failed") -> None:
         # Keep the wire code fixed: the message is for the log, not the client.
+        Exception.__init__(self, message)
+
+
+class StorageFullError(CloudError):
+    """The write would violate the free-space reserve; fail before ACKing."""
+
+    status_code = 507
+    code = "storage_full"
+
+    def __init__(self, message: str = "not enough free space") -> None:
         Exception.__init__(self, message)
 
 
@@ -142,6 +158,160 @@ def derived_object_key(
         f"{DERIVED_PREFIX}{owner_user_id}/{meeting_id}/{input_version}/"
         f"{suffix}/{uuid4().hex}.wav"
     )
+
+
+class LocalObjectStore:
+    """One file per key under ``root``, published atomically.
+
+    Keys are server generated and never client supplied, so a rejected key is a
+    bug in the caller and raises ``ObjectStoreError`` instead of a 400. Every
+    write is staged in ``root/.tmp`` and published with ``os.replace``, so a
+    crash leaves no partial object; the free-space reserve is checked before
+    staging, so a full disk is a 507 rather than a truncated object.
+    """
+
+    def __init__(
+        self, root: Path, *, min_free_bytes: int = _DEFAULT_MIN_FREE_BYTES
+    ) -> None:
+        if min_free_bytes < 0:
+            raise ValueError("min_free_bytes must be non-negative")
+        self.root = Path(root).resolve()
+        #: Bytes that must stay free after every write; public for health checks.
+        self.min_free_bytes = min_free_bytes
+        self.temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    @property
+    def temp_dir(self) -> Path:
+        return self.root / _TEMP_DIRNAME
+
+    # -- write path ------------------------------------------------------
+
+    def _resolve(self, key: str) -> Path:
+        """Map a key to its path under ``root``, refusing every unsafe shape."""
+        if not isinstance(key, str) or not 1 <= len(key) <= _KEY_MAX_CHARS:
+            raise ObjectStoreError("invalid_object_key")
+        if not _KEY_PATTERN.match(key):
+            # Also rejects a backslash, a NUL byte and a leading "/".
+            raise ObjectStoreError("invalid_object_key")
+        if any(segment in ("", ".", "..") for segment in key.split("/")):
+            raise ObjectStoreError("invalid_object_key")
+        target = (self.root / key).resolve(strict=False)
+        if not target.is_relative_to(self.root):
+            # Defence in depth: a symlinked parent can escape a valid key.
+            raise ObjectStoreError("invalid_object_key")
+        return target
+
+    def available_bytes(self) -> int:
+        try:
+            stats = os.statvfs(self.root)
+        except OSError as exc:
+            raise ObjectStoreError("storage_unavailable") from exc
+        return stats.f_bavail * stats.f_frsize
+
+    def _require_space(self, needed: int) -> None:
+        if self.available_bytes() < needed + self.min_free_bytes:
+            raise StorageFullError("disk_full")
+
+    def _stage_path(self) -> Path:
+        return self.temp_dir / f".put-{uuid4().hex}"
+
+    def _write_bytes(self, stage: Path, body: bytes) -> None:
+        fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _publish(self, stage: Path, target: Path, expected: int) -> None:
+        if stage.stat().st_size != expected:
+            raise ObjectStoreError("object_size_mismatch")
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        os.replace(stage, target)
+        os.chmod(target, 0o640)
+        # fsync the directory too, so the rename itself survives a crash.
+        fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _map_write_error(self, exc: OSError, needed: int = 0) -> CloudError:
+        """Map a failed write: a full disk is a 507, every other failure a 500.
+
+        ``ENOSPC``/``EDQUOT`` are the direct signal, even when the free-space
+        probe just before the write still saw room (the disk can fill in
+        between). A write that failed for another reason while the reserve is
+        now actually breached is still a full disk. ``exc`` also keeps this
+        helper callable from the read path.
+        """
+        if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            return StorageFullError("disk_full")
+        try:
+            free = self.available_bytes()
+        except ObjectStoreError:
+            return ObjectStoreError("write_failed")
+        if free < needed + self.min_free_bytes:
+            return StorageFullError("disk_full")
+        return ObjectStoreError("write_failed")
+
+    def put_verified(self, key: str, body: bytes, sha256: str) -> None:
+        target = self._resolve(key)
+        if not body:
+            raise ObjectStoreError("empty_body")
+        actual = hashlib.sha256(body).hexdigest()
+        if not hmac.compare_digest(actual, sha256):
+            raise ObjectStoreError("checksum_mismatch")
+        self._require_space(len(body))
+        stage = self._stage_path()
+        try:
+            self._write_bytes(stage, body)
+            self._publish(stage, target, len(body))
+        except ObjectStoreError:
+            stage.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            stage.unlink(missing_ok=True)
+            raise self._map_write_error(exc, len(body)) from exc
+
+    def put_file_verified(
+        self,
+        key: str,
+        path: Path,
+        sha256: str,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> int:
+        """Copy a file already on disk, hashing it while streaming."""
+        target = self._resolve(key)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(STREAM_BLOCK_BYTES), b""):
+                    digest.update(block)
+                    size += len(block)
+        except OSError as exc:
+            raise ObjectStoreError("unreadable_file") from exc
+        if size == 0:
+            raise ObjectStoreError("empty_body")
+        if not hmac.compare_digest(digest.hexdigest(), sha256):
+            raise ObjectStoreError("checksum_mismatch")
+        self._require_space(size)
+        stage = self._stage_path()
+        try:
+            fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as out, open(path, "rb") as src:
+                shutil.copyfileobj(src, out, STREAM_BLOCK_BYTES)
+                out.flush()
+                os.fsync(out.fileno())
+            self._publish(stage, target, size)
+        except ObjectStoreError:
+            stage.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            stage.unlink(missing_ok=True)
+            raise self._map_write_error(exc, size) from exc
+        return size
 
 
 class S3ObjectStore:
