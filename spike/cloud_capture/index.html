@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud capture probe</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0 auto;
+        max-width: 52rem;
+        padding: 2rem 1.25rem 4rem;
+        line-height: 1.5;
+      }
+      h1 { margin-bottom: 0.25rem; }
+      .tag {
+        display: inline-block;
+        border: 1px solid currentColor;
+        border-radius: 999px;
+        padding: 0 0.6rem;
+        font-size: 0.8rem;
+        opacity: 0.8;
+      }
+      section {
+        border: 1px solid rgba(127, 127, 127, 0.35);
+        border-radius: 0.75rem;
+        padding: 1rem 1.25rem;
+        margin-top: 1.25rem;
+      }
+      button {
+        font: inherit;
+        padding: 0.45rem 0.85rem;
+        margin: 0 0.4rem 0.4rem 0;
+        border-radius: 0.45rem;
+        border: 1px solid rgba(127, 127, 127, 0.5);
+        background: Canvas;
+        color: CanvasText;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      pre {
+        overflow-x: auto;
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        background: rgba(127, 127, 127, 0.12);
+        font-size: 0.85rem;
+      }
+      table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+      th, td { text-align: left; padding: 0.3rem 0.4rem; border-bottom: 1px solid rgba(127,127,127,0.25); }
+      .warn { color: #b45309; }
+      .ok { color: #15803d; }
+      .bad { color: #b91c1c; }
+      code { font-size: 0.85em; }
+    </style>
+  </head>
+  <body>
+    <h1>Cloud capture probe</h1>
+    <p>
+      <span class="tag">spike</span>
+      <span class="tag">synthetic or live probe data only</span>
+      <span class="tag">no production API</span>
+    </p>
+
+    <p>
+      This page answers one question: can the browser deliver microphone audio
+      and shared system audio at the same time while the screen-share video
+      track stays alive but is <strong>never encoded</strong>?
+    </p>
+
+    <p class="warn">
+      Video frames are never recorded, uploaded, logged, or measured here. The
+      only bytes that leave this page are audio chunks you explicitly upload to
+      the local probe server.
+    </p>
+
+    <section>
+      <h2>1. Probe capture</h2>
+      <p>
+        Clicking a button is the user gesture that opens the browser prompt. A
+        dual probe asks for the microphone first, then for a display share with
+        audio; the video track is kept alive only so the share does not stop.
+      </p>
+      <button id="probe-mic" type="button">Probe microphone only</button>
+      <button id="probe-dual" type="button">Probe microphone + shared audio</button>
+      <p id="probe-state">No capture yet.</p>
+      <pre id="probe-result">(no ProbeResult yet)</pre>
+    </section>
+
+    <section>
+      <h2>2. Record audio-only chunks</h2>
+      <p>
+        One <code>MediaRecorder</code> per audio source. Each encoder input is
+        checked to contain audio tracks only. Timeslice: 3000&nbsp;ms.
+      </p>
+      <button id="record-start" type="button" disabled>Start recording</button>
+      <button id="record-stop" type="button" disabled>Stop recording</button>
+      <p id="record-state">Nothing recorded.</p>
+      <table>
+        <thead>
+          <tr><th>source</th><th>chunk</th><th>bytes</th><th>type</th></tr>
+        </thead>
+        <tbody id="chunk-rows">
+          <tr><td colspan="4">No chunks.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>3. Upload and reassemble</h2>
+      <p>
+        Upload sends chunks out of order on purpose (newest first) to prove the
+        server reassembles by sequence number. Reconstruct returns 409 with
+        <code>header_dependency</code> when a container chunk cannot stand
+        alone.
+      </p>
+      <button id="upload" type="button" disabled>Upload chunks (reverse order)</button>
+      <button id="reconstruct" type="button" disabled>Reconstruct</button>
+      <p id="upload-state">Nothing uploaded.</p>
+      <pre id="upload-result">(no upload yet)</pre>
+    </section>
+
+    <section>
+      <h2>What this page does not prove</h2>
+      <ul>
+        <li>No real operating-system / browser / meeting-application matrix row is verified here.</li>
+        <li>No Bluetooth or USB headset behaviour, no speaker echo, no drivetime.</li>
+        <li>No production chunking, retry, or epoch policy is fixed by this probe.</li>
+      </ul>
+    </section>
+
+    <script type="module">
+      import { CHUNK_TARGET_MS, describeProbeFailure, probeCapture } from "./capture.mjs";
+
+      const probeState = document.querySelector("#probe-state");
+      const probeResult = document.querySelector("#probe-result");
+      const recordState = document.querySelector("#record-state");
+      const chunkRows = document.querySelector("#chunk-rows");
+      const uploadState = document.querySelector("#upload-state");
+      const uploadResult = document.querySelector("#upload-result");
+      const buttons = {
+        mic: document.querySelector("#probe-mic"),
+        dual: document.querySelector("#probe-dual"),
+        start: document.querySelector("#record-start"),
+        stop: document.querySelector("#record-stop"),
+        upload: document.querySelector("#upload"),
+        reconstruct: document.querySelector("#reconstruct"),
+      };
+
+      let result = null;
+      let chunks = null;
+      let uploadedTrack = null;
+
+      function summarise(probe) {
+        const { session } = probe;
+        return {
+          dualReady: probe.dualReady,
+          encodedSources: probe.encodedSources,
+          codec: probe.codec,
+          codecs: probe.codecs,
+          videoTrackLifecycle: probe.videoTrackLifecycle,
+          chunkTargetMs: CHUNK_TARGET_MS,
+          micTracks: session.micAudioTracks.map((track) => ({
+            label: track.label,
+            settings: track.getSettings?.() ?? {},
+            readyState: track.readyState,
+          })),
+          systemAudioTracks: session.systemAudioTracks.map((track) => ({
+            label: track.label,
+            settings: track.getSettings?.() ?? {},
+            readyState: track.readyState,
+          })),
+          videoTracks: session.videoTracks.map((track) => ({
+            label: track.label,
+            settings: track.getSettings?.() ?? {},
+            readyState: track.readyState,
+            encoded: false,
+          })),
+        };
+      }
+
+      function setRecordingEnabled(enabled) {
+        buttons.start.disabled = !enabled;
+        buttons.stop.disabled = true;
+        buttons.upload.disabled = !(chunks && Object.values(chunks).some((list) => list.length > 0));
+        buttons.reconstruct.disabled = !uploadedTrack;
+      }
+
+      async function runProbe(mode) {
+        for (const button of Object.values(buttons)) button.disabled = true;
+        probeState.textContent = `Requesting ${mode} capture…`;
+        probeState.className = "";
+        probeResult.textContent = "(pending)";
+        try {
+          const probe = await probeCapture(mode, navigator.mediaDevices);
+          result = probe;
+          chunks = null;
+          uploadedTrack = null;
+          probeState.textContent = probe.dualReady
+            ? "Dual audio ready: microphone and shared system audio are both present."
+            : mode === "dual"
+              ? "Dual audio NOT ready: the shared stream did not expose system audio."
+              : "Microphone capture ready.";
+          probeState.className = probe.dualReady || mode === "mic" ? "ok" : "bad";
+          probeResult.textContent = JSON.stringify(summarise(probe), null, 2);
+          buttons.start.disabled = false;
+          recordState.textContent = "Ready. Start recording when you are ready.";
+        } catch (error) {
+          result = null;
+          probeState.textContent = `Probe failed: ${error?.message ?? error}`;
+          probeState.className = "bad";
+          probeResult.textContent = JSON.stringify(describeProbeFailure(error), null, 2);
+          buttons.start.disabled = true;
+        } finally {
+          buttons.mic.disabled = false;
+          buttons.dual.disabled = false;
+          buttons.stop.disabled = true;
+          buttons.upload.disabled = true;
+          buttons.reconstruct.disabled = true;
+        }
+      }
+
+      buttons.mic.addEventListener("click", () => runProbe("mic"));
+      buttons.dual.addEventListener("click", () => runProbe("dual"));
+
+      buttons.start.addEventListener("click", async () => {
+        if (!result) return;
+        buttons.start.disabled = true;
+        buttons.stop.disabled = false;
+        try {
+          const started = await result.session.start();
+          recordState.textContent = `Recording… ${JSON.stringify(started)}`;
+          recordState.className = "ok";
+        } catch (error) {
+          recordState.textContent = `Could not start: ${error?.message ?? error}`;
+          recordState.className = "bad";
+          buttons.start.disabled = false;
+        }
+      });
+
+      buttons.stop.addEventListener("click", async () => {
+        if (!result) return;
+        buttons.stop.disabled = true;
+        recordState.textContent = "Stopping encoders…";
+        try {
+          chunks = await result.session.stop();
+          const rows = [];
+          for (const [source, list] of Object.entries(chunks)) {
+            list.forEach((blob, index) => {
+              rows.push(
+                `<tr><td>${source}</td><td>${index}</td><td>${blob.size}</td><td>${blob.type || "(browser default)"}</td></tr>`,
+              );
+            });
+          }
+          chunkRows.innerHTML = rows.length
+            ? rows.join("")
+            : '<tr><td colspan="4">Encoders produced no chunks.</td></tr>';
+          const total = Object.values(chunks).reduce((sum, list) => sum + list.length, 0);
+          recordState.textContent = `Stopped. ${total} chunk(s) held in memory; tracks released.`;
+          recordState.className = "ok";
+          buttons.upload.disabled = total === 0;
+          buttons.start.disabled = false;
+        } catch (error) {
+          recordState.textContent = `Could not stop cleanly: ${error?.message ?? error}`;
+          recordState.className = "bad";
+        }
+      });
+
+      buttons.upload.addEventListener("click", async () => {
+        if (!chunks) return;
+        buttons.upload.disabled = true;
+        uploadResult.textContent = "(uploading)";
+        try {
+          const report = [];
+          for (const [source, list] of Object.entries(chunks)) {
+            const codec = result.codecs?.[source] ?? result.codec ?? "";
+            // Deliberately newest-first: the server must sort by sequence.
+            for (let index = list.length - 1; index >= 0; index -= 1) {
+              const response = await fetch(
+                `/probe/upload?track=${encodeURIComponent(source)}&sequence=${index}&codec=${encodeURIComponent(codec)}`,
+                { method: "POST", body: list[index] },
+              );
+              const payload = await response.json();
+              report.push({ source, sequence: index, status: response.status, payload });
+            }
+            uploadedTrack = { source, codec };
+          }
+          uploadState.textContent = `Uploaded ${report.length} chunk(s) in reverse order.`;
+          uploadState.className = "ok";
+          uploadResult.textContent = JSON.stringify(report, null, 2);
+          buttons.reconstruct.disabled = false;
+        } catch (error) {
+          uploadState.textContent = `Upload failed: ${error?.message ?? error}`;
+          uploadState.className = "bad";
+        } finally {
+          buttons.upload.disabled = false;
+        }
+      });
+
+      buttons.reconstruct.addEventListener("click", async () => {
+        if (!uploadedTrack) return;
+        const url = `/probe/reconstruct?track=${encodeURIComponent(uploadedTrack.source)}&codec=${encodeURIComponent(uploadedTrack.codec)}`;
+        uploadResult.textContent = `GET ${url}\n(pending)`;
+        try {
+          const response = await fetch(url);
+          const type = response.headers.get("Content-Type") ?? "";
+          if (response.status === 200) {
+            const bytes = await response.arrayBuffer();
+            uploadResult.textContent = `GET ${url}\n200 ${type}\nreconstructed bytes: ${bytes.byteLength}`;
+            uploadState.textContent = "Reconstruction succeeded.";
+            uploadState.className = "ok";
+          } else {
+            const payload = await response.json();
+            uploadResult.textContent = `GET ${url}\n${response.status} ${type}\n${JSON.stringify(payload, null, 2)}`;
+            uploadState.textContent =
+              payload.error === "header_dependency"
+                ? "Header dependency confirmed: this chunk cannot be decoded alone."
+                : `Reconstruct returned ${response.status}.`;
+            uploadState.className = "warn";
+          }
+        } catch (error) {
+          uploadResult.textContent = `Reconstruct failed: ${error?.message ?? error}`;
+        }
+      });
+
+      // Probe-only introspection hook for the Playwright driver. It exposes
+      // captured audio bytes and metadata, never video frames.
+      window.__probeDebug = {
+        snapshot: () => (result ? summarise(result) : null),
+        chunks: async () => {
+          if (!chunks) return null;
+          const out = {};
+          for (const [source, list] of Object.entries(chunks)) {
+            out[source] = [];
+            for (const blob of list) {
+              const bytes = new Uint8Array(await blob.arrayBuffer());
+              let binary = "";
+              for (let index = 0; index < bytes.length; index += 0x8000) {
+                binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+              }
+              out[source].push({
+                type: blob.type,
+                size: blob.size,
+                base64: btoa(binary),
+              });
+            }
+          }
+          return out;
+        },
+      };
+
+      window.addEventListener("beforeunload", () => {
+        result?.session?.stop?.().catch(() => {});
+      });
+    </script>
+  </body>
+</html>

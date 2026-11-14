@@ -1,0 +1,310 @@
+{
+  "contract_version": "0.1.0",
+  "status": "probe_only_not_production",
+  "generated_at": "2026-11-14",
+  "task": "docs/superpowers/plans/2026-11-14-cloud-meeting-recorder.md Task 2",
+  "selected_codec": "audio/webm;codecs=opus",
+  "selected_codec_evidence_status": "verified_synthetic_chrome_157",
+  "selected_codec_detail": {
+    "selection": "MediaRecorder.isTypeSupported preference order; first supported wins",
+    "preference_order": [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/ogg",
+      "audio/mp4",
+      "audio/mpeg"
+    ],
+    "observed_mime_type": "audio/webm;codecs=opus",
+    "observed_per_track": {
+      "mic": "audio/webm;codecs=opus",
+      "system": "audio/webm;codecs=opus"
+    },
+    "container": "WebM",
+    "codec": "Opus"
+  },
+  "chunk_target_ms": 3000,
+  "chunk_target_evidence_status": "verified_synthetic_chrome_157",
+  "chunk_target_detail": {
+    "mechanism": "MediaRecorder.start(timeslice=3000)",
+    "observed_chunks_per_track": 3,
+    "observed_duration_s": 7,
+    "observed_sizes_bytes": {
+      "mic": [
+        42666,
+        48316,
+        16437
+      ],
+      "system": [
+        42666,
+        48316,
+        16437
+      ]
+    },
+    "note": "The stop tail can be shorter than the target; the first chunk carries the container header. Design §7.4 suggests a 2-5 s target; 3 s was probed."
+  },
+  "continuity_mode": "header+ordered_chunks",
+  "continuity_mode_evidence_status": "verified_synthetic_chrome_157",
+  "continuity_detail": {
+    "summary": "Chunks are container fragments, not independent files. Reassembly requires chunk 0 (header) plus ascending sequence order. The probe server verifies sequence continuity and rejects a headerless first chunk instead of guessing.",
+    "header_dependency_observed": true,
+    "single_chunk_alone": {
+      "status": 409,
+      "error": "header_dependency",
+      "dependent": true
+    },
+    "out_of_order_reassembly": "Upload order 2,1,0 reconstructed byte-identically to the browser-side concatenation for both tracks.",
+    "checksum": "sha256 compared byte-for-byte after reconstruction",
+    "reconstructed_bytes": 107419,
+    "reconstructed_sha256": {
+      "mic": "a8185c80c73015e3dcbbf85a8beb02078e6b880f0d301dd1c7b157bb137b4903",
+      "system": "995380f8a5d7289d1260f7f861db4ac4cef443e0592209d564c8f8263fd5b7c5"
+    },
+    "full_stream_decode": {
+      "decoder": "Chrome 157 native Audio element (no ffmpeg)",
+      "error": null,
+      "duration_s": 6.6,
+      "canplay": true,
+      "played_seconds": 0.590301
+    },
+    "headerless_chunk_decode": {
+      "decoder": "Chrome 157 native Audio element (no ffmpeg)",
+      "error": "4: PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed",
+      "duration_s": null
+    }
+  },
+  "video_track_lifecycle": "kept_live_unencoded",
+  "video_track_lifecycle_evidence_status": "verified_synthetic_chrome_157",
+  "video_track_detail": {
+    "policy": "getDisplayMedia is called with {video:true, audio:true}; video:false is never assumed. A video track may be required by the browser to obtain a share, but its frames must never be encoded, uploaded, stored, or logged.",
+    "observed": "A 320x180 5 fps canvas video track stayed live for the whole synthetic recording and was ended with the audio tracks at stop.",
+    "encoded_in_media_recorder": false,
+    "encoded_video_chunks": 0,
+    "video_uploaded": false,
+    "video_logged": false,
+    "encoder_stream_guard": "capture.mjs refuses any encoder stream containing a video track"
+  },
+  "epoch_anchor_rule": "A refresh or re-authorization starts a new capture_epoch_id. Within one epoch, both audio tracks use the same monotonic clock and every segment records start_ms/end_ms relative to that epoch anchor. Across epochs, preserve the real interruption interval and clock uncertainty by combining the server manifest, the meeting start time, and the resume-time anchor; never splice a new page's performance.now() as if the audio were continuous, and never compress an interruption into seamless audio.",
+  "epoch_anchor_evidence_status": "design_derived_not_verified",
+  "epoch_anchor_detail": {
+    "source": "docs/product/cloud-meeting-recorder-design.md §7.2",
+    "new_epoch_triggers": [
+      "page refresh",
+      "re-authorization"
+    ],
+    "same_epoch_clock": "one monotonic clock shared by mic and system tracks",
+    "cross_epoch": "preserve real gap and clock uncertainty; use server manifest + meeting start + resume anchor",
+    "verified_end_to_end": false,
+    "reason": "No refresh, re-authorization, or recovery scenario was run; only the design rule is recorded."
+  },
+  "supported_combinations": [
+    {
+      "id": "macos-chrome-157-synthetic",
+      "environment": "macOS + Chrome (synthetic MediaStreams only)",
+      "os_version": "macOS 26.2 (build 25C56)",
+      "browser": "Google Chrome 157.0.8103.52 (headless, Playwright channel chrome)",
+      "meeting_app": "none; synthetic MediaStreams",
+      "share_target": "canvas.captureStream(5) 320x180 + synthetic WebAudio track; not a real tab or desktop share",
+      "output_route": "synthetic WebAudio destination; no real speaker or headphone route",
+      "headphones": "n/a",
+      "audio_track_present": "yes (synthetic 440 Hz mic and 660 Hz display audio)",
+      "correct_audio": "synthetic tones only; no speech",
+      "duration_s": 7,
+      "drift_measured": "no",
+      "decode_latency_ms": null,
+      "evidence_status": "verified_synthetic_only",
+      "reason": "Exercises JS/MediaRecorder/container behaviour only. Does not prove real OS audio capture, meeting-app routing, or playback routing."
+    },
+    {
+      "id": "windows-chrome-edge",
+      "environment": "Windows + Chrome/Edge",
+      "os_version": null,
+      "browser": "Chrome/Edge (version not tested)",
+      "meeting_app": "not tested",
+      "share_target": "not tested",
+      "output_route": "not tested",
+      "headphones": "not tested",
+      "audio_track_present": null,
+      "correct_audio": null,
+      "duration_s": null,
+      "drift_measured": "not_run",
+      "decode_latency_ms": null,
+      "evidence_status": "not_run",
+      "reason": "No Windows host available in this environment. This is the primary validation target and must be run on real hardware."
+    },
+    {
+      "id": "macos-chrome-edge",
+      "environment": "macOS + Chrome/Edge",
+      "os_version": null,
+      "browser": "Chrome/Edge (version not tested)",
+      "meeting_app": "not tested",
+      "share_target": "not tested",
+      "output_route": "not tested",
+      "headphones": "not tested",
+      "audio_track_present": null,
+      "correct_audio": null,
+      "duration_s": null,
+      "drift_measured": "not_run",
+      "decode_latency_ms": null,
+      "evidence_status": "not_run",
+      "reason": "Only synthetic Chrome streams were run; no real microphone, screen share, meeting app, or system-audio authorization. Desktop/system audio is high risk per design §5.3."
+    },
+    {
+      "id": "macos-safari",
+      "environment": "macOS + Safari",
+      "os_version": null,
+      "browser": "Safari (version not tested)",
+      "meeting_app": "not tested",
+      "share_target": "not tested",
+      "output_route": "not tested",
+      "headphones": "not tested",
+      "audio_track_present": null,
+      "correct_audio": null,
+      "duration_s": null,
+      "drift_measured": "not_run",
+      "decode_latency_ms": null,
+      "evidence_status": "not_run",
+      "reason": "Safari was not available or exercised; design marks it pending, not a first-release dual-capture guarantee."
+    },
+    {
+      "id": "windows-macos-firefox",
+      "environment": "Windows/macOS + Firefox",
+      "os_version": null,
+      "browser": "Firefox (version not tested)",
+      "meeting_app": "not tested",
+      "share_target": "not tested",
+      "output_route": "not tested",
+      "headphones": "not tested",
+      "audio_track_present": null,
+      "correct_audio": null,
+      "duration_s": null,
+      "drift_measured": "not_run",
+      "decode_latency_ms": null,
+      "evidence_status": "not_run",
+      "reason": "Firefox was not available or exercised; design marks it pending."
+    },
+    {
+      "id": "linux-chrome-edge",
+      "environment": "Linux desktop + Chrome/Edge",
+      "os_version": null,
+      "browser": "Chrome/Edge (version not tested)",
+      "meeting_app": "not tested",
+      "share_target": "not tested",
+      "output_route": "not tested",
+      "headphones": "not tested",
+      "audio_track_present": null,
+      "correct_audio": null,
+      "duration_s": null,
+      "drift_measured": "not_run",
+      "decode_latency_ms": null,
+      "evidence_status": "not_run",
+      "reason": "No Linux host available; design schedules Linux for later validation."
+    },
+    {
+      "id": "mobile-tablet",
+      "environment": "Mobile/tablet browsers",
+      "os_version": null,
+      "browser": "not tested",
+      "meeting_app": "not tested",
+      "share_target": "not tested",
+      "output_route": "not tested",
+      "headphones": "not tested",
+      "audio_track_present": null,
+      "correct_audio": null,
+      "duration_s": null,
+      "drift_measured": "not_run",
+      "decode_latency_ms": null,
+      "evidence_status": "not_run",
+      "reason": "No mobile device was available; design does not guarantee first-release recording on mobile/tablet."
+    }
+  ],
+  "unverified_fields": [
+    {
+      "field": "real_microphone_capture",
+      "evidence_status": "not_run",
+      "reason": "Synthetic WebAudio track only."
+    },
+    {
+      "field": "browser_meeting_tab_audio",
+      "evidence_status": "not_run",
+      "reason": "No real tab capture or meeting app."
+    },
+    {
+      "field": "desktop_meeting_system_audio",
+      "evidence_status": "not_run",
+      "reason": "No desktop meeting app or system-audio share."
+    },
+    {
+      "field": "speaker_headphone_routing_and_echo",
+      "evidence_status": "not_run",
+      "reason": "No real output device or acoustic path."
+    },
+    {
+      "field": "two_track_alignment_drift",
+      "evidence_status": "not_run",
+      "reason": "Synthetic tracks were generated together; drift was not measured."
+    },
+    {
+      "field": "long_session_2h",
+      "evidence_status": "not_run",
+      "reason": "Only ~7 s was recorded."
+    },
+    {
+      "field": "network_loss_30s_and_retry",
+      "evidence_status": "not_run",
+      "reason": "Local loopback only; no network impairment."
+    },
+    {
+      "field": "refresh_crash_sleep_recovery",
+      "evidence_status": "not_run",
+      "reason": "No refresh or recovery scenario was executed."
+    },
+    {
+      "field": "share_stop_mid_recording",
+      "evidence_status": "not_run",
+      "reason": "Share was not stopped independently of the recording."
+    },
+    {
+      "field": "tail_chunk_loss_and_hash_mismatch",
+      "evidence_status": "not_run",
+      "reason": "Happy path plus out-of-order only."
+    },
+    {
+      "field": "realtime_decode_latency",
+      "evidence_status": "not_run",
+      "reason": "Decode was offline after stop, not realtime."
+    },
+    {
+      "field": "audio_worklet_pcm_comparison",
+      "evidence_status": "not_run",
+      "reason": "Browser native decode was available; no realtime target was measured."
+    },
+    {
+      "field": "epoch_anchor_rule",
+      "evidence_status": "design_derived_not_verified",
+      "reason": "Rule recorded from design §7.2; no epoch transition was exercised."
+    },
+    {
+      "field": "server_ack_durability",
+      "evidence_status": "partial_probe_only",
+      "reason": "Probe writes via temp file + os.replace before returning 200, but has no fsync, idempotency key, or ACK ledger."
+    },
+    {
+      "field": "safari_firefox_edge_windows_linux_mobile",
+      "evidence_status": "not_run",
+      "reason": "No such hosts/browsers were available."
+    }
+  ],
+  "evidence_files": [
+    "docs/superpowers/evidence/cloud/capture.md",
+    "docs/superpowers/evidence/cloud/upload.md",
+    "docs/superpowers/evidence/cloud/capture-contract.json"
+  ],
+  "notes": [
+    "This is a probe contract, not a production API or a compatibility claim.",
+    "Real-machine Step 4 matrix rows are not_run because no real OS/browser/meeting-app combination could be driven in this environment.",
+    "The brief refers to design section 19 (unverified fields); docs/product/cloud-meeting-recorder-design.md has sections 0-18 only. The unverified fields here are derived from §5.3 and §16 instead.",
+    "The browser probe used playwright-core 1.65.1 installed temporarily in /tmp/cloud-probe-pw, not a committed devDependency; the deliverable list for Task 2 does not include package.json or node_modules.",
+    "Homebrew ffmpeg is broken (missing libmp3lame); decode was performed by Chrome's native media stack, not ffmpeg."
+  ]
+}
