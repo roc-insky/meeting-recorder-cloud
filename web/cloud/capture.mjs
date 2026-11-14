@@ -51,12 +51,13 @@ export async function startCapture(options = {}) {
   const offsetMs = Number.isFinite(epoch.offsetMs) ? epoch.offsetMs : 0;
   const anchorMs = Number.isFinite(epoch.anchorMs) ? epoch.anchorMs : clock.now();
 
-  const state = { state: "idle", error: null, reason: null, startedAt: null };
+  const state = { state: "idle", error: null, reason: null, startedAt: null, shareError: null };
   let micStream = null;
   let displayStream = null;
   let chain = Promise.resolve();
   let stopPromise = null;
   let recorderError = null;
+  let stopping = false;
 
   function emit(event) {
     if (event.state) state.state = event.state;
@@ -81,28 +82,54 @@ export async function startCapture(options = {}) {
     }
   }
 
-  emit({ state: "requesting_permissions" });
-
-  try {
-    if (mode === "mic" || mode === "dual") {
-      micStream = await mediaDevices.getUserMedia({ audio: true, video: false });
-    }
-    if (mode === "dual" || mode === "system") {
-      if (typeof mediaDevices.getDisplayMedia !== "function") {
-        throw Object.assign(new Error("display capture is unavailable"), {
-          name: "NotSupportedError",
-        });
-      }
-      displayStream = await mediaDevices.getDisplayMedia({ video: true, audio: true });
-    }
-  } catch (error) {
+  function fail(error, forcedState = null) {
     stopStreams();
     const denied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
-    state.state = denied ? "permission_denied" : "capture_failed";
+    state.state = forcedState ?? (denied ? "permission_denied" : "capture_failed");
     state.error = error?.name ?? "capture_failed";
     state.reason = error?.message ?? String(error);
     emit({ state: state.state, error: state.error, reason: state.reason });
     throw error;
+  }
+
+  function shareFailure(error) {
+    state.shareError = {
+      error: error?.name ?? "capture_failed",
+      reason: error?.message ?? String(error),
+    };
+    return state.shareError;
+  }
+
+  emit({ state: "requesting_permissions" });
+
+  // A denied microphone always aborts: there would be nothing to record.
+  if (mode === "mic" || mode === "dual") {
+    try {
+      micStream = await mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  async function openDisplay() {
+    if (typeof mediaDevices.getDisplayMedia !== "function") {
+      throw Object.assign(new Error("display capture is unavailable"), {
+        name: "NotSupportedError",
+      });
+    }
+    return mediaDevices.getDisplayMedia({ video: true, audio: true });
+  }
+
+  // In dual mode the microphone is the recording of last resort. A refused or
+  // silent screen share must not destroy the microphone recording; the caller
+  // can ask the user to share again with requestSystem().
+  if (mode === "dual" || mode === "system") {
+    try {
+      displayStream = await openDisplay();
+    } catch (error) {
+      if (mode === "system") fail(error);
+      shareFailure(error);
+    }
   }
 
   const audioSources = [];
@@ -118,16 +145,13 @@ export async function startCapture(options = {}) {
   }
 
   if (audioSources.length === 0) {
-    stopStreams();
     const reason =
       mode === "system" || mode === "dual"
         ? "system_audio_unavailable"
         : "no_microphone_audio_track";
-    state.state = "capture_failed";
-    state.error = reason;
-    state.reason = "no audio track was produced";
-    emit({ state: state.state, error: state.error, reason: state.reason });
-    throw new Error(reason);
+    const error = new Error(reason);
+    error.name = reason;
+    fail(error);
   }
 
   const mimeType = selectMimeType(RecorderCtor);
@@ -140,36 +164,6 @@ export async function startCapture(options = {}) {
     for (const track of stream?.getVideoTracks?.() ?? []) {
       videoTracks.push(track);
     }
-  }
-
-  for (const entry of audioSources) {
-    const seen = (perSourceCount.get(entry.source) ?? 0) + 1;
-    perSourceCount.set(entry.source, seen);
-    const settings = entry.track.getSettings?.() ?? {};
-    const sampleRate = Number.isFinite(settings.sampleRate) ? settings.sampleRate : null;
-    const spec = {
-      id: seen === 1 ? entry.source : `${entry.source}-${seen}`,
-      source: entry.source,
-      codec,
-      sample_rate: sampleRate,
-      sample_rate_source: sampleRate === null ? "unknown" : "track_settings",
-      track: entry.track,
-      sequence: 0,
-      cursorMs: offsetMs,
-    };
-    specs.push(spec);
-  }
-
-  const requestedIds = requestedTracks?.length
-    ? new Set(requestedTracks.map((track) => track.id ?? track))
-    : null;
-  const selected = requestedIds ? specs.filter((spec) => requestedIds.has(spec.id)) : specs;
-  if (selected.length === 0) {
-    stopStreams();
-    state.state = "capture_failed";
-    state.error = "no_matching_track";
-    emit({ state: state.state, error: state.error, reason: state.error });
-    throw new Error("no_matching_track");
   }
 
   function makeRecorder(stream) {
@@ -186,9 +180,39 @@ export async function startCapture(options = {}) {
     }
   }
 
-  for (const spec of selected) {
-    const streamForRecorder =
-      typeof globalThis.MediaStream === "function" ? new globalThis.MediaStream([spec.track]) : spec.stream;
+  function buildSpec(entry, cursorMs) {
+    const seen = (perSourceCount.get(entry.source) ?? 0) + 1;
+    perSourceCount.set(entry.source, seen);
+    const settings = entry.track.getSettings?.() ?? {};
+    const sampleRate = Number.isFinite(settings.sampleRate) ? settings.sampleRate : null;
+    return {
+      id: seen === 1 ? entry.source : `${entry.source}-${seen}`,
+      source: entry.source,
+      codec,
+      sample_rate: sampleRate,
+      sample_rate_source: sampleRate === null ? "unknown" : "track_settings",
+      track: entry.track,
+      stream: entry.stream,
+      sequence: 0,
+      cursorMs,
+    };
+  }
+
+  function audioOnlyStream(track) {
+    if (typeof globalThis.MediaStream === "function") {
+      return new globalThis.MediaStream([track]);
+    }
+    // Node has no MediaStream. A minimal audio-only view keeps the invariant
+    // that a shared video track can never reach a MediaRecorder.
+    return {
+      getTracks: () => [track],
+      getAudioTracks: () => (track.kind === "audio" ? [track] : []),
+      getVideoTracks: () => (track.kind === "video" ? [track] : []),
+    };
+  }
+
+  function attachRecorder(spec) {
+    const streamForRecorder = audioOnlyStream(spec.track);
     const recorder = makeRecorder(streamForRecorder);
     if (typeof recorder.mimeType === "string" && recorder.mimeType) {
       spec.codec = recorder.mimeType;
@@ -228,9 +252,24 @@ export async function startCapture(options = {}) {
       emit({ state: "recorder_error", error: error?.name ?? "recorder_error", reason: error?.message });
     };
 
-    recordersForTrack.recorder = recorder;
     recorders.push(recordersForTrack);
+    return recordersForTrack;
   }
+
+  const initialSpecs = audioSources.map((entry) => buildSpec(entry, offsetMs));
+  const requestedIds = requestedTracks?.length
+    ? new Set(requestedTracks.map((track) => track.id ?? track))
+    : null;
+  const selected = requestedIds
+    ? initialSpecs.filter((spec) => requestedIds.has(spec.id))
+    : initialSpecs;
+  if (selected.length === 0) {
+    const error = new Error("no_matching_track");
+    error.name = "no_matching_track";
+    fail(error);
+  }
+  specs.push(...selected);
+  for (const spec of selected) attachRecorder(spec);
 
   try {
     for (const { recorder } of recorders) {
@@ -244,12 +283,7 @@ export async function startCapture(options = {}) {
         // Best effort.
       }
     }
-    stopStreams();
-    state.state = "capture_failed";
-    state.error = error?.name ?? "recorder_start_failed";
-    state.reason = error?.message ?? String(error);
-    emit({ state: state.state, error: state.error, reason: state.reason });
-    throw error;
+    fail(error, "capture_failed");
   }
 
   state.startedAt = clock.now();
@@ -259,11 +293,61 @@ export async function startCapture(options = {}) {
     mimeType,
     epochId,
     offsetMs,
+    shareError: state.shareError,
   });
+
+  async function requestSystem() {
+    if (stopping || state.state === "stopped") throw new Error("capture_stopped");
+    if (displayStream?.getAudioTracks?.().length) {
+      return { tracks: specsNow(), shareError: null };
+    }
+    let stream;
+    try {
+      stream = await openDisplay();
+    } catch (error) {
+      const failure = shareFailure(error);
+      emit({ state: "system_unavailable", ...failure });
+      throw error;
+    }
+    displayStream = stream;
+    for (const track of stream.getVideoTracks?.() ?? []) {
+      videoTracks.push(track);
+    }
+    const systemTracks = stream.getAudioTracks();
+    if (systemTracks.length === 0) {
+      const error = new Error("system_audio_unavailable");
+      error.name = "system_audio_unavailable";
+      const failure = shareFailure(error);
+      emit({ state: "system_unavailable", ...failure });
+      throw error;
+    }
+    const cursorMs = offsetMs + Math.max(0, clock.now() - anchorMs);
+    for (const track of systemTracks) {
+      const spec = buildSpec({ source: "system", track, stream }, cursorMs);
+      specs.push(spec);
+      try {
+        attachRecorder(spec);
+        recorders.at(-1).recorder.start(chunkTargetMs);
+      } catch (error) {
+        fail(error, "capture_failed");
+      }
+    }
+    state.shareError = null;
+    emit({
+      state: "system_joined",
+      tracks: specsNow(),
+      mimeType,
+      epochId,
+      offsetMs,
+      shareError: null,
+    });
+    return { tracks: specsNow(), shareError: null };
+  }
 
   async function stop() {
     if (stopPromise) return stopPromise;
     if (state.state === "stopped") return undefined;
+    stopping = true;
     emit({ state: "stopping" });
     stopPromise = (async () => {
       for (const entry of recorders) {
@@ -298,7 +382,7 @@ export async function startCapture(options = {}) {
   }
 
   function specsNow() {
-    return selected.map(publicSpec);
+    return specs.map(publicSpec);
   }
 
   function publicSpec(spec) {
@@ -320,12 +404,17 @@ export async function startCapture(options = {}) {
     get error() {
       return recorderError;
     },
+    get shareError() {
+      return state.shareError;
+    },
     epochId,
     offsetMs,
     mimeType,
     trackSpecs: specsNow,
     specs: specsNow,
-    liveTracks: () => [...videoTracks, ...selected.map((spec) => spec.track)],
+    liveTracks: () => [...videoTracks, ...specs.map((spec) => spec.track)],
+    systemAvailable: () => specs.some((spec) => spec.source === "system"),
+    requestSystem,
     stop,
   };
 }

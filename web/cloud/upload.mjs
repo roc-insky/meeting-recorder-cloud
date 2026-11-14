@@ -173,5 +173,14 @@ export function createHttpTransport({ session, baseUrl = "" } = {}) {
         body: bytes,
       });
     },
+
+    async seal(uploadId, manifest) {
+      const path = `/api/cloud/uploads/${encodeURIComponent(uploadId)}/seal`;
+      return session.request(baseUrl ? new URL(path, baseUrl).toString() : path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: manifest,
+      });
+    },
   };
 }

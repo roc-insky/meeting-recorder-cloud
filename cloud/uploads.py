@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from cloud.auth import require_csrf, require_user
@@ -69,6 +69,9 @@ ALLOWED_CODECS = frozenset(
     }
 )
 MAX_TRACKS_PER_EPOCH = 2
+#: A refresh/re-auth anchor is never claimed to be exact (Task 7): a new epoch
+#: carries at least this much clock uncertainty.
+CROSS_EPOCH_UNCERTAINTY_MS = 1000
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 router = APIRouter(prefix="/api/cloud", tags=["uploads"])
@@ -131,42 +134,46 @@ def _require_epoch_track(ctx: AuthContext, upload_id: str, epoch_id: str, track_
 
 
 def _ack_view(ctx: AuthContext, upload_id: str, *, duplicate: bool) -> AckView:
-    """Describe the ACKed contiguous prefix of the newest epoch.
+    """Describe the saved position: the intersection of every epoch track.
 
     The saved position is the contiguous confirmed span, never the maximum
-    sequence: a hole in the middle still reports the position before it.
+    sequence: a hole in the middle still reports the position before it. It is
+    also never the newest epoch alone; a page reload that starts a mic-only
+    epoch must not move the position past the last confirmed system audio.
     """
     db = ctx.require_db()
-    epoch = _newest_epoch(ctx, upload_id)
-    if epoch is None:
-        return AckView(accepted=True, duplicate=duplicate, contiguous_ms=0, missing=[])
-    track_ids = list(
-        db.scalars(
-            select(UploadEpochTrack.track_id)
-            .where(
-                UploadEpochTrack.owner_user_id == ctx.user_id,
-                UploadEpochTrack.upload_session_id == upload_id,
-                UploadEpochTrack.epoch_id == epoch.id,
-            )
-            .order_by(UploadEpochTrack.track_id)
+    rows = db.execute(
+        select(UploadEpochTrack, UploadEpoch)
+        .join(
+            UploadEpoch,
+            (UploadEpoch.owner_user_id == UploadEpochTrack.owner_user_id)
+            & (UploadEpoch.upload_session_id == UploadEpochTrack.upload_session_id)
+            & (UploadEpoch.id == UploadEpochTrack.epoch_id),
         )
-    )
+        .where(
+            UploadEpochTrack.owner_user_id == ctx.user_id,
+            UploadEpochTrack.upload_session_id == upload_id,
+        )
+        .order_by(UploadEpoch.created_at, UploadEpoch.id, UploadEpochTrack.track_id)
+    ).all()
     positions: list[int] = []
     missing: list[Gap] = []
-    for track_id in track_ids:
+    for link, epoch in rows:
         chunks = list(
             db.scalars(
                 select(Chunk)
                 .where(
                     Chunk.owner_user_id == ctx.user_id,
                     Chunk.upload_session_id == upload_id,
-                    Chunk.epoch_id == epoch.id,
-                    Chunk.track_id == track_id,
+                    Chunk.epoch_id == link.epoch_id,
+                    Chunk.track_id == link.track_id,
                 )
                 .order_by(Chunk.sequence)
             )
         )
-        contiguous, gaps = _track_prefix(track_id, chunks)
+        contiguous, gaps = _track_prefix(
+            link.track_id, chunks, start=epoch.offset_ms
+        )
         positions.append(contiguous)
         missing.extend(gaps)
     contiguous_ms = min(positions) if positions else 0
@@ -178,9 +185,11 @@ def _ack_view(ctx: AuthContext, upload_id: str, *, duplicate: bool) -> AckView:
     )
 
 
-def _track_prefix(track_id: str, chunks: list[Chunk]) -> tuple[int, list[Gap]]:
+def _track_prefix(
+    track_id: str, chunks: list[Chunk], *, start: int = 0
+) -> tuple[int, list[Gap]]:
     expected = 0
-    contiguous = 0
+    contiguous = start
     for chunk in chunks:
         if chunk.sequence != expected:
             return contiguous, [
@@ -363,6 +372,43 @@ def create_upload(
     return upload
 
 
+def _with_anchor_uncertainty(
+    ctx: AuthContext, upload_id: str, epoch: CaptureEpoch
+) -> CaptureEpoch:
+    """Never claim a refreshed clock origin is exact (Task 7, design §7.2).
+
+    A new epoch after a refresh/re-auth keeps its real interruption. Its anchor
+    also gains uncertainty: at least CROSS_EPOCH_UNCERTAINTY_MS, and more when
+    the new offset would overlap audio the server already holds.
+    """
+    db = ctx.require_db()
+    previous = db.scalar(
+        select(UploadEpoch.id)
+        .where(
+            UploadEpoch.owner_user_id == ctx.user_id,
+            UploadEpoch.upload_session_id == upload_id,
+        )
+        .limit(1)
+    )
+    if previous is None:
+        return epoch
+    max_end = db.scalar(
+        select(func.max(Chunk.end_ms)).where(
+            Chunk.owner_user_id == ctx.user_id,
+            Chunk.upload_session_id == upload_id,
+        )
+    )
+    uncertainty = max(
+        epoch.uncertainty_ms,
+        CROSS_EPOCH_UNCERTAINTY_MS,
+        (max_end or 0) - epoch.offset_ms,
+        0,
+    )
+    if uncertainty == epoch.uncertainty_ms:
+        return epoch
+    return epoch.model_copy(update={"uncertainty_ms": uncertainty})
+
+
 def register_epoch(
     ctx: AuthContext,
     upload_id: str,
@@ -381,6 +427,7 @@ def register_epoch(
         raise InvalidRequestError("invalid_epoch_id")
     if db.get(UploadEpoch, (ctx.user_id, upload_id, epoch.id)) is not None:
         raise ConflictError("epoch_exists")
+    epoch = _with_anchor_uncertainty(ctx, upload_id, epoch)
 
     seen_ids: set[str] = set()
     seen_sources: set[str] = set()

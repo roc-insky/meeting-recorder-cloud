@@ -167,6 +167,25 @@ def release_capture(ctx: AuthContext, token: str) -> None:
         ctx.require_db().commit()
 
 
+def release_live_capture(
+    ctx: AuthContext, meeting_id: str, now: datetime | None = None
+) -> None:
+    """Mark any live lease for this meeting released; the caller commits.
+
+    Sealing closes the recording: a finished upload must not keep blocking the
+    next capture, and the lease is bound to the meeting it was acquired for.
+    """
+    ctx.require_db().execute(
+        update(CaptureLease)
+        .where(
+            CaptureLease.owner_user_id == ctx.user_id,
+            CaptureLease.meeting_id == meeting_id,
+            CaptureLease.released_at.is_(None),
+        )
+        .values(released_at=now or _now(ctx))
+    )
+
+
 # -- HTTP surface ----------------------------------------------------------
 
 

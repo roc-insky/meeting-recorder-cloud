@@ -14,6 +14,7 @@ guessing identifiers.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -29,6 +30,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from cloud.db import Base
@@ -133,6 +135,17 @@ class UploadSession(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     sealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Set with ``status='sealed'``: complete only when every track was
+    #: verified against the client manifest; otherwise visibly partial.
+    sealed_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: Chunk count frozen at seal time (design §7.2 input_version).
+    input_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    #: Explicit gaps recorded at seal time, kept with the recording forever.
+    seal_gaps: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
 
     __table_args__ = (
         ForeignKeyConstraint(
@@ -145,7 +158,13 @@ class UploadSession(Base):
             "status IN ('open', 'sealed', 'cancelled')",
             name="ck_upload_sessions_status",
         ),
+        CheckConstraint(
+            "sealed_status IS NULL OR sealed_status IN ('complete', 'partial')",
+            name="ck_upload_sessions_sealed_status",
+        ),
+        CheckConstraint("input_version >= 0", name="ck_upload_sessions_input_version"),
         Index("ix_upload_sessions_owner_created", "owner_user_id", "created_at"),
+        Index("ix_upload_sessions_status_created", "status", "created_at"),
     )
 
 

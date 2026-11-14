@@ -73,6 +73,10 @@ export class RecordingSession {
     this.quotaStopped = false;
     this.storageFailed = false;
     this.eventsClosed = false;
+    this.seen = new Map();
+    this.seal = null;
+    this.sealError = null;
+    this.downgrade = null;
   }
 
   static async restore(options = {}) {
@@ -120,9 +124,12 @@ export class RecordingSession {
     return this.snapshot();
   }
 
-  async stop() {
+  async stop({ confirmDowngrade = false } = {}) {
     if (this.stopPromise) return this.stopPromise;
     this.stopPromise = (async () => {
+      // handle.stop() awaits both recorders' tail chunks and the chunk chain,
+      // so every byte captured before the user clicked stop is in IndexedDB
+      // before the manifest is built.
       if (this.handle) await this.handle.stop();
       await this.refreshUploadStats();
       if (this.upload.pendingChunks > 0 && !this.storageFailed) {
@@ -132,9 +139,139 @@ export class RecordingSession {
         this.capture.state = "stopped";
       }
       this.capture.stoppedAt = this.clock.now();
+      const sealed = await this.sealRecording({ confirmDowngrade });
+      if (sealed?.status === "downgrade_confirmation_required") {
+        // Releasing stop() lets the caller ask the user and call stop again
+        // with explicit confirmation; nothing is sealed in the meantime.
+        this.stopPromise = null;
+        return {
+          ...(await this.snapshot()),
+          status: "downgrade_confirmation_required",
+          seal: null,
+          downgrade: sealed.downgrade,
+        };
+      }
       return this.snapshot();
     })();
     return this.stopPromise;
+  }
+
+  async requestSystem() {
+    if (!this.handle || typeof this.handle.requestSystem !== "function") {
+      throw new Error("system capture is unavailable");
+    }
+    const result = await this.handle.requestSystem();
+    if (this.capture.shareError) this.capture.shareError = null;
+    await this.refreshUploadStats();
+    return result ?? this.snapshot();
+  }
+
+  buildManifest() {
+    const entries = new Map();
+    for (const record of this.seen.values()) {
+      entries.set(`${record.captureEpochId}:${record.trackId}`, {
+        capture_epoch_id: record.captureEpochId,
+        track_id: record.trackId,
+        last_sequence: record.lastSequence,
+        end_ms: record.endMs,
+        source: record.source,
+      });
+    }
+    // A registered track that failed before producing any chunk must still be
+    // in the manifest: omitting it would hide a missing system recording.
+    const offset = this.epoch.offsetMs;
+    for (const spec of this.handle?.specs?.() ?? []) {
+      const key = `${this.epoch.id}:${spec.id}`;
+      if (!entries.has(key)) {
+        entries.set(key, {
+          capture_epoch_id: this.epoch.id,
+          track_id: spec.id,
+          last_sequence: -1,
+          end_ms: offset,
+          source: spec.source,
+        });
+      }
+    }
+    return [...entries.values()].sort(
+      (left, right) =>
+        left.capture_epoch_id.localeCompare(right.capture_epoch_id) ||
+        left.track_id.localeCompare(right.track_id),
+    );
+  }
+
+  async sealRecording({ confirmDowngrade = false } = {}) {
+    if (this.storageFailed || this.logoutState === LOGGED_OUT) return null;
+    const transport = this.pump?.transport;
+    if (!transport || typeof transport.seal !== "function") return null;
+    const manifest = this.buildManifest();
+    if (manifest.length === 0) return null;
+
+    const overallEnd = Math.max(...manifest.map((entry) => entry.end_ms), this.epoch.offsetMs);
+    const systemEntries = manifest.filter(
+      (entry) => entry.source === "system" || entry.track_id.startsWith("system"),
+    );
+    const systemEnd = systemEntries.length
+      ? Math.max(...systemEntries.map((entry) => entry.end_ms))
+      : null;
+    const systemHasChunks = systemEntries.some((entry) => entry.last_sequence >= 0);
+    const downgraded = this.mode === "dual" && overallEnd > 0 && (systemEnd === null || systemEnd < overallEnd);
+    let gap = null;
+    if (downgraded) {
+      gap = {
+        track_id: "system",
+        start_ms: systemEnd ?? 0,
+        end_ms: overallEnd,
+        reason: systemHasChunks ? "missing_tail" : "missing_track",
+      };
+      if (!confirmDowngrade) {
+        return {
+          status: "downgrade_confirmation_required",
+          downgrade: {
+            from: "dual",
+            to: "mic",
+            changed_at_ms: this.clock.now(),
+            gap,
+          },
+        };
+      }
+      this.downgrade = {
+        from: "dual",
+        to: "mic",
+        changed_at_ms: this.clock.now(),
+        gap,
+      };
+    }
+
+    const tracks = manifest.map(({ source, ...entry }) => entry);
+    try {
+      const result = await transport.seal(this.uploadId, {
+        tracks,
+        accept_partial: Boolean(gap) || Boolean(this.downgrade),
+      });
+      this.seal = {
+        status: result?.status === "complete" ? "complete" : "partial",
+        input_version: Number.isFinite(result?.input_version) ? result.input_version : 0,
+        gaps: Array.isArray(result?.gaps) ? result.gaps.map((item) => ({ ...item })) : [],
+      };
+      this.sealError = null;
+      this.setUploadState(this.seal.status === "complete" ? "complete" : "partial");
+      if (this.seal.gaps.length > 0) {
+        this.upload.warning = {
+          code: "recording_gap",
+          message: "Recording sealed with visible gaps",
+          at: Date.now(),
+          gaps: this.seal.gaps,
+        };
+      }
+      this.emit({ state: "sealed", status: this.seal.status, gaps: this.seal.gaps });
+    } catch (error) {
+      this.sealError = {
+        code: error?.code ?? error?.name ?? "seal_failed",
+        message: error?.message ?? String(error),
+      };
+      this.emit({ state: "seal_failed", ...this.sealError });
+    }
+    return this.seal;
   }
 
   async resume() {
@@ -244,6 +381,9 @@ export class RecordingSession {
       },
       processing: { ...this.processing },
       tracks,
+      seal: this.seal ? { ...this.seal, gaps: this.seal.gaps.map((gap) => ({ ...gap })) } : null,
+      sealError: this.sealError ? { ...this.sealError } : null,
+      downgrade: this.downgrade ? { ...this.downgrade } : null,
       warnings: warning ? [warning] : [],
     };
   }
@@ -270,6 +410,16 @@ export class RecordingSession {
         timesliceMs: meta.timesliceMs ?? this.chunkTargetMs,
       };
       await this.buffer.put(this.userId, fullMeta, bytes);
+      const key = `${fullMeta.captureEpochId}:${fullMeta.trackId}`;
+      const prior = this.seen.get(key);
+      this.seen.set(key, {
+        captureEpochId: fullMeta.captureEpochId,
+        trackId: fullMeta.trackId,
+        source: fullMeta.source,
+        lastSequence:
+          prior === undefined ? fullMeta.sequence : Math.max(prior.lastSequence, fullMeta.sequence),
+        endMs: prior === undefined ? fullMeta.endMs : Math.max(prior.endMs, fullMeta.endMs),
+      });
     } catch (error) {
       await this.storageFailure(error);
       throw error;
@@ -292,7 +442,17 @@ export class RecordingSession {
         this.capture.state = "recording";
         this.capture.error = null;
         this.capture.reason = null;
+        this.capture.shareError = event.shareError ?? null;
         this.capture.startedAt = this.clock.now();
+        break;
+      case "system_joined":
+        this.capture.shareError = null;
+        break;
+      case "system_unavailable":
+        this.capture.shareError = {
+          error: event.error ?? "system_unavailable",
+          reason: event.reason ?? null,
+        };
         break;
       case "permission_denied":
         this.capture.state = "permission_denied";

@@ -546,7 +546,21 @@ export class FakeUploadTransport {
     this.calls = [];
     this.accepted = [];
     this.events = [];
+    this.sealCalls = [];
+    this.sealResponse = null;
+    this.sealError = null;
     this.onSend = null;
+  }
+
+  async seal(uploadId, manifest) {
+    this.sealCalls.push({ uploadId, manifest });
+    if (this.sealError) throw this.sealError;
+    if (this.sealResponse) return this.sealResponse;
+    return {
+      input_version: this.accepted.length,
+      status: manifest?.accept_partial ? "partial" : "complete",
+      gaps: [],
+    };
   }
 
   async putChunk({ meta, bytes }) {
