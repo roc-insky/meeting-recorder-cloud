@@ -41,6 +41,7 @@ TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 #: Child tables first; CASCADE makes the order advisory rather than required.
 TRUNCATE_TABLES = (
+    "resource_events",
     "derived_assets",
     "transcript_segments",
     "transcript_speakers",

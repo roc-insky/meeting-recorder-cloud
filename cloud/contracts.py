@@ -309,11 +309,17 @@ class AnnotationView(_Contract):
 
 
 class EventView(_Contract):
+    """One durable resource event; the cursor is the global event id."""
+
     cursor: int = Field(ge=0)
-    meeting_id: str
-    generation: int = Field(ge=0)
-    type: str = Field(min_length=1)
-    payload: dict[str, Any] = Field(default_factory=dict)
+    event: str = Field(min_length=1)
+    data: dict[str, Any] = Field(default_factory=dict)
+    created_at: IsoUtc
+
+
+class EventPage(_Contract):
+    items: list[EventView] = Field(default_factory=list)
+    next_cursor: int = Field(ge=0)
 
 
 # -- models, embeddings, voiceprints --------------------------------------

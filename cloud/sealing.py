@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Path
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
-from cloud import uploads
+from cloud import events, uploads
 from cloud.auth import require_csrf
 from cloud.contracts import (
     AuthContext,
@@ -30,6 +30,7 @@ from cloud.contracts import (
     ConflictError,
     Gap,
     InvalidRequestError,
+    iso_utc,
     SealRequest,
     SealView,
     TrackManifest,
@@ -182,6 +183,20 @@ def seal_upload(
     upload.seal_gaps = [gap.model_dump() for gap in gaps]
     upload.sealed_at = now
     upload.updated_at = now
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=upload.meeting_id,
+        event="upload.sealed",
+        data={
+            "upload_session_id": upload.id,
+            "status": status,
+            "input_version": input_version,
+            "gap_count": len(gaps),
+            "sealed_at": iso_utc(now),
+        },
+        now=now,
+    )
     release_live_capture(ctx, upload.meeting_id, now)
     try:
         db.commit()
@@ -253,6 +268,20 @@ def _seal_expired(db: Any, settings: Settings, now: datetime) -> int:
         upload.seal_gaps = [gap.model_dump() for gap in _dedupe(gaps)]
         upload.sealed_at = now
         upload.updated_at = now
+        events.record(
+            db,
+            owner_user_id=upload.owner_user_id,
+            meeting_id=upload.meeting_id,
+            event="upload.sealed",
+            data={
+                "upload_session_id": upload.id,
+                "status": upload.sealed_status,
+                "input_version": upload.input_version,
+                "gap_count": len(upload.seal_gaps),
+                "sealed_at": iso_utc(now),
+            },
+            now=now,
+        )
         sealed += 1
     if sealed:
         try:

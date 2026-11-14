@@ -17,6 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, or_, select
 
+from cloud import events
 from cloud.auth import require_csrf, require_user
 from cloud.contracts import (
     AuthContext,
@@ -126,6 +127,19 @@ def create_meeting(
     )
     db = ctx.require_db()
     db.add(meeting)
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=meeting.id,
+        event="meeting.created",
+        data={
+            "meeting_id": meeting.id,
+            "mode": meeting.mode,
+            "generation": meeting.generation,
+            "created_at": iso_utc(meeting.created_at),
+        },
+        now=now,
+    )
     db.commit()
     return _view(meeting)
 
@@ -139,7 +153,20 @@ def rename_meeting(ctx: AuthContext, meeting_id: str, title: str) -> MeetingView
     meeting = _find_meeting(ctx, meeting_id)
     meeting.title = _clean_title(title)
     meeting.updated_at = _utcnow(ctx)
-    ctx.require_db().commit()
+    db = ctx.require_db()
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=meeting.id,
+        event="meeting.updated",
+        data={
+            "meeting_id": meeting.id,
+            "generation": meeting.generation,
+            "updated_at": iso_utc(meeting.updated_at),
+        },
+        now=meeting.updated_at,
+    )
+    db.commit()
     return _view(meeting)
 
 

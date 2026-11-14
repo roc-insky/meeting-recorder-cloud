@@ -28,7 +28,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from cloud import events
 from cloud.auth import require_csrf, require_user
+from cloud.live import submit_live
 from cloud.contracts import (
     AckView,
     AuthContext,
@@ -328,6 +330,22 @@ def put_chunk(
             created_at=now,
         )
     )
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=upload.meeting_id,
+        event="upload.progress",
+        data={
+            "upload_session_id": meta.upload_session_id,
+            "capture_epoch_id": meta.capture_epoch_id,
+            "track_id": meta.track_id,
+            "sequence": meta.sequence,
+            "start_ms": meta.start_ms,
+            "end_ms": meta.end_ms,
+            "created_at": iso_utc(now),
+        },
+        now=now,
+    )
     try:
         db.commit()
     except IntegrityError as exc:
@@ -341,7 +359,14 @@ def put_chunk(
         # same idempotency key can retry and the orphan scan can find it.
         db.rollback()
         raise CloudError("commit_failed") from exc
-    return _ack_view(ctx, meta.upload_session_id, duplicate=False)
+    ack = _ack_view(ctx, meta.upload_session_id, duplicate=False)
+    # The chunk is durable now; live scheduling is an O(1) side channel and
+    # must never delay or fail the ACK.
+    try:
+        submit_live(upload.meeting_id, ctx.user_id, ack.contiguous_ms)
+    except Exception:
+        pass
+    return ack
 
 
 def get_ack(ctx: AuthContext, upload_session_id: str) -> AckView:
@@ -368,6 +393,18 @@ def create_upload(
         updated_at=now,
     )
     db.add(upload)
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=meeting_id,
+        event="upload.created",
+        data={
+            "upload_session_id": upload.id,
+            "status": upload.status,
+            "created_at": iso_utc(upload.created_at),
+        },
+        now=now,
+    )
     db.commit()
     return upload
 
@@ -484,6 +521,19 @@ def register_epoch(
                 track_id=spec.id,
             )
         )
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=upload.meeting_id,
+        event="upload.updated",
+        data={
+            "upload_session_id": upload_id,
+            "capture_epoch_id": epoch.id,
+            "tracks": [spec.id for spec in tracks],
+            "created_at": iso_utc(now),
+        },
+        now=now,
+    )
     try:
         db.commit()
     except IntegrityError as exc:

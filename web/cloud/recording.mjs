@@ -13,6 +13,44 @@ const ACTIVE = "active";
 // A local downgrade is evidence the server may not have: when the system track
 // was never registered, the server can only answer "complete" for the mic
 // manifest. Keep the locally known gap and never lose it to a server verb.
+
+const TASK_STATES = Object.freeze({
+  waiting: "queued",
+  running: "running",
+  completed: "completed",
+  failed: "failed",
+  cancelled: "cancelled",
+});
+
+// Server events describe processing only. They never assert that capture or
+// upload is running, and no transcript text or speaker label is invented here.
+function processingFromTask(task) {
+  if (!task || typeof task !== "object") return null;
+  const state = TASK_STATES[task.status] ?? "unknown";
+  const result = { state };
+  if (typeof task.id === "string") result.taskId = task.id;
+  if (typeof task.task_id === "string") result.taskId = task.task_id;
+  if (Number.isInteger(task.input_version)) result.inputVersion = task.input_version;
+  if (Number.isInteger(task.generation)) result.generation = task.generation;
+  if (typeof task.error_code === "string") result.errorCode = task.error_code;
+  return result;
+}
+
+function processingFromSnapshot(data) {
+  const tasks = Array.isArray(data?.tasks)
+    ? data.tasks.filter((task) => task && typeof task === "object")
+    : [];
+  const active = tasks.find(
+    (task) => task.status === "running" || task.status === "waiting",
+  );
+  if (active) return processingFromTask(active);
+  if (data?.transcript && typeof data.transcript.id === "string") {
+    return { state: "completed", transcriptId: data.transcript.id };
+  }
+  if (tasks.length > 0) return processingFromTask(tasks[0]);
+  return { state: "not_submitted" };
+}
+
 function mergeSealGaps(...groups) {
   const merged = new Map();
   for (const group of groups) {
@@ -94,6 +132,8 @@ export class RecordingSession {
     this.seal = null;
     this.sealError = null;
     this.downgrade = null;
+    this.eventStream = null;
+    this.eventCursor = 0;
   }
 
   static async restore(options = {}) {
@@ -626,13 +666,74 @@ export class RecordingSession {
     }
   }
 
+  attachEventStream(stream) {
+    if (!stream || typeof stream.close !== "function") return null;
+    if (this.eventsClosed) {
+      try {
+        stream.close();
+      } catch {
+        // A late stream is closed immediately after logout/expiry.
+      }
+      return null;
+    }
+    if (this.eventStream && this.eventStream !== stream) {
+      try {
+        this.eventStream.close?.();
+      } catch {
+        // Replacing a stream is best effort.
+      }
+    }
+    this.eventStream = stream;
+    return stream;
+  }
+
+  applyServerEvent(event) {
+    const name = typeof event?.event === "string" ? event.event : null;
+    if (!name) return { ...this.processing };
+    const cursor = Number(event?.cursor);
+    if (Number.isInteger(cursor) && cursor >= 0) {
+      // EventSource guarantees order; dropping an older cursor keeps a delayed
+      // replay from rolling visible processing state backwards.
+      if (cursor < this.eventCursor) return { ...this.processing };
+      this.eventCursor = cursor;
+    }
+    const data =
+      event?.data && typeof event.data === "object" && !Array.isArray(event.data)
+        ? event.data
+        : {};
+    let next = null;
+    if (name === "snapshot") next = processingFromSnapshot(data);
+    else if (name === "task.updated") next = processingFromTask(data);
+    else if (name === "transcript.published") {
+      next = { state: "completed" };
+      if (typeof data.version_id === "string") next.transcriptId = data.version_id;
+      if (typeof data.task_id === "string") next.taskId = data.task_id;
+    }
+    if (next) {
+      this.processing = next;
+      this.emit({ state: "processing", processing: { ...next } });
+    }
+    return { ...this.processing };
+  }
+
   closeEventStream() {
     if (this.eventsClosed) return;
     this.eventsClosed = true;
-    try {
-      this.closeEvents?.close?.();
-    } catch {
-      // Closing the local event stream must never block logout.
+    const stream = this.eventStream;
+    this.eventStream = null;
+    if (stream) {
+      try {
+        stream.close?.();
+      } catch {
+        // Closing the local event stream must never block logout.
+      }
+    }
+    if (this.closeEvents && this.closeEvents !== stream) {
+      try {
+        this.closeEvents?.close?.();
+      } catch {
+        // A separate close hook is best effort too.
+      }
     }
   }
 

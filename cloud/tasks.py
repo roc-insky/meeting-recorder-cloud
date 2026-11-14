@@ -30,6 +30,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from cloud import events
 from cloud.auth import require_csrf
 from cloud.contracts import (
     AuthContext,
@@ -152,7 +153,11 @@ def enqueue_final(
             ProcessingTask.meeting_id == meeting_id,
             ProcessingTask.kind == "final",
         )
-        .order_by(ProcessingTask.created_at.desc(), ProcessingTask.id.desc())
+        .order_by(
+            ProcessingTask.generation.desc(),
+            ProcessingTask.created_at.desc(),
+            ProcessingTask.id.desc(),
+        )
         .limit(1)
     ).scalar_one_or_none()
 
@@ -170,10 +175,22 @@ def enqueue_final(
 
     supersede = latest is not None
     generation = meeting.generation
+    superseded_rows: list[ProcessingTask] = []
     if supersede:
         generation = meeting.generation + 1
         meeting.generation = generation
         meeting.updated_at = now
+        # Load the rows before the bulk update so each resulting cancellation
+        # has a durable event in this same transaction.
+        superseded_rows = list(
+            db.scalars(
+                select(ProcessingTask).where(
+                    ProcessingTask.owner_user_id == ctx.user_id,
+                    ProcessingTask.meeting_id == meeting_id,
+                    ProcessingTask.status.in_(("waiting", "running")),
+                )
+            )
+        )
         # Only this meeting's open tasks are superseded; no other user waits.
         db.execute(
             update(ProcessingTask)
@@ -207,6 +224,37 @@ def enqueue_final(
         updated_at=now,
     )
     db.add(task)
+    for row in superseded_rows:
+        events.record(
+            db,
+            owner_user_id=row.owner_user_id,
+            meeting_id=meeting_id,
+            event="task.updated",
+            data={
+                "task_id": row.id,
+                "status": "cancelled",
+                "error_code": "superseded",
+                "input_version": row.input_version,
+                "generation": row.generation,
+                "updated_at": iso_utc(now),
+            },
+            now=now,
+        )
+    events.record(
+        db,
+        owner_user_id=ctx.user_id,
+        meeting_id=meeting_id,
+        event="task.updated",
+        data={
+            "task_id": task.id,
+            "status": task.status,
+            "input_version": task.input_version,
+            "generation": task.generation,
+            "created_at": iso_utc(now),
+            "updated_at": iso_utc(now),
+        },
+        now=now,
+    )
     db.commit()
     return _view(task)
 
@@ -225,6 +273,15 @@ def claim_task(
         ProcessingTask.status == "running",
         ProcessingTask.lease_deadline < now,
     )
+    # Lock the rows before changing them so two concurrent claims cannot both
+    # record the same requeue/failure transition as an event.
+    expired_rows = list(
+        db.scalars(select(ProcessingTask).where(*expired).with_for_update())
+    )
+    expired_states = [
+        (row, "failed" if row.attempt >= MAX_ATTEMPTS else "waiting")
+        for row in expired_rows
+    ]
     db.execute(
         update(ProcessingTask)
         .where(*expired, ProcessingTask.attempt >= MAX_ATTEMPTS)
@@ -249,6 +306,24 @@ def claim_task(
             updated_at=now,
         )
     )
+    for row, status in expired_states:
+        if row.meeting_id is None:
+            continue
+        events.record(
+            db,
+            owner_user_id=row.owner_user_id,
+            meeting_id=row.meeting_id,
+            event="task.updated",
+            data={
+                "task_id": row.id,
+                "status": status,
+                "error_code": "lease_expired" if status == "failed" else row.error_code,
+                "input_version": row.input_version,
+                "generation": row.generation,
+                "updated_at": iso_utc(now),
+            },
+            now=now,
+        )
     db.commit()
 
     candidates = [row[0] for row in db.execute(_CANDIDATE_SQL).all()]
@@ -273,6 +348,21 @@ def claim_task(
         task.lease_acquired_at = now
         task.lease_deadline = deadline
         task.updated_at = now
+        if task.meeting_id is not None:
+            events.record(
+                db,
+                owner_user_id=task.owner_user_id,
+                meeting_id=task.meeting_id,
+                event="task.updated",
+                data={
+                    "task_id": task.id,
+                    "status": task.status,
+                    "input_version": task.input_version,
+                    "generation": task.generation,
+                    "updated_at": iso_utc(now),
+                },
+                now=now,
+            )
         db.commit()
         return _claimed(task, lease_token)
 
@@ -493,6 +583,37 @@ def publish_result(
     task.updated_at = now
     meeting.current_transcript_id = result.id
     meeting.updated_at = now
+    # Both the transcript pointer and the terminal task state are durable in
+    # this commit; a rejected publish returned before reaching this point.
+    events.record(
+        db,
+        owner_user_id=task.owner_user_id,
+        meeting_id=task.meeting_id,
+        event="transcript.published",
+        data={
+            "version_id": result.id,
+            "task_id": task.id,
+            "status": result.status,
+            "empty": result.empty,
+            "warnings": list(result.warnings),
+            "created_at": iso_utc(now),
+        },
+        now=now,
+    )
+    events.record(
+        db,
+        owner_user_id=task.owner_user_id,
+        meeting_id=task.meeting_id,
+        event="task.updated",
+        data={
+            "task_id": task.id,
+            "status": task.status,
+            "input_version": task.input_version,
+            "generation": task.generation,
+            "updated_at": iso_utc(now),
+        },
+        now=now,
+    )
     try:
         db.commit()
     except IntegrityError:
@@ -537,6 +658,22 @@ def fail_task(
     else:
         task.status = "failed"
         task.completed_at = now
+    if task.meeting_id is not None:
+        events.record(
+            db,
+            owner_user_id=task.owner_user_id,
+            meeting_id=task.meeting_id,
+            event="task.updated",
+            data={
+                "task_id": task.id,
+                "status": task.status,
+                "error_code": task.error_code,
+                "input_version": task.input_version,
+                "generation": task.generation,
+                "updated_at": iso_utc(now),
+            },
+            now=now,
+        )
     db.commit()
     return True
 
@@ -564,6 +701,22 @@ def cancel_task(ctx: AuthContext, task_id: str) -> None:
     task.completed_at = now
     task.updated_at = now
     _clear_lease(task)
+    if task.meeting_id is not None:
+        events.record(
+            db,
+            owner_user_id=task.owner_user_id,
+            meeting_id=task.meeting_id,
+            event="task.updated",
+            data={
+                "task_id": task.id,
+                "status": task.status,
+                "error_code": task.error_code,
+                "input_version": task.input_version,
+                "generation": task.generation,
+                "updated_at": iso_utc(now),
+            },
+            now=now,
+        )
     db.commit()
 
 

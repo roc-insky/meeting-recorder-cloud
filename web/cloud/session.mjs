@@ -98,6 +98,86 @@ export function isSessionExpired(error) {
   return error instanceof CloudRequestError && error.status === 401;
 }
 
+// Durable meeting event feed. EventSource reconnects on its own and echoes the
+// last SSE id as Last-Event-ID, so the server resumes from the durable cursor.
+// No token is ever placed in the URL: the HttpOnly session cookie is used.
+export const MEETING_EVENT_NAMES = Object.freeze([
+  "snapshot",
+  "meeting.created",
+  "meeting.updated",
+  "upload.created",
+  "upload.updated",
+  "upload.progress",
+  "upload.sealed",
+  "task.updated",
+  "transcript.published",
+]);
+
+export function meetingEventsUrl(meetingId, { after = null, baseUrl = "" } = {}) {
+  if (typeof meetingId !== "string" || meetingId.length === 0) {
+    throw new TypeError("meetingId is required");
+  }
+  const target = new URL(
+    `/api/cloud/meetings/${encodeURIComponent(meetingId)}/events/stream`,
+    baseUrl || globalThis.location?.origin || "http://localhost",
+  );
+  if (Number.isInteger(after) && after >= 0) target.searchParams.set("after", String(after));
+  return target;
+}
+
+export function openMeetingEvents(options = {}) {
+  const {
+    meetingId,
+    after = null,
+    baseUrl = "",
+    eventSourceFactory = (url, init) => new globalThis.EventSource(url, init),
+    onEvent = () => {},
+    onError = () => {},
+  } = options;
+
+  const target = meetingEventsUrl(meetingId, { after, baseUrl });
+  const source = eventSourceFactory(target.toString(), { withCredentials: true });
+  let closed = false;
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    try {
+      source?.close?.();
+    } catch {
+      // Closing a stream never throws into logout or session-expiry handling.
+    }
+  }
+
+  function dispatch(name) {
+    return (message) => {
+      if (closed) return;
+      const data = safeJson(message?.data);
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        onError({ code: "invalid_event_data", event: name });
+        return;
+      }
+      const parsedId = Number(message?.lastEventId);
+      const cursor = Number.isInteger(parsedId) && parsedId >= 0 ? parsedId : null;
+      try {
+        onEvent({ event: name, cursor, data });
+      } catch {
+        // A listener must not break the stream for later events.
+      }
+    };
+  }
+
+  for (const name of MEETING_EVENT_NAMES) {
+    source.addEventListener(name, dispatch(name));
+  }
+  source.onerror = (error) => {
+    if (!closed) onError(error ?? { code: "stream_error" });
+  };
+
+  return { close };
+}
+
+
 function isJsonBody(body) {
   if (body === undefined || body === null) return false;
   if (typeof body === "string") return false;

@@ -23,6 +23,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     SmallInteger,
@@ -717,5 +718,73 @@ class DerivedAsset(Base):
             "owner_user_id",
             "meeting_id",
             "input_version",
+        ),
+    )
+
+
+#: The closed set of durable resource event names (mirrored by a DB check).
+EVENT_NAMES = (
+    'snapshot',
+    'meeting.created',
+    'meeting.updated',
+    'upload.created',
+    'upload.updated',
+    'upload.progress',
+    'upload.sealed',
+    'task.updated',
+    'transcript.published',
+)
+
+
+class ResourceEvent(Base):
+    """One durable, owner-scoped event in the resource feed.
+
+    The BigInteger identity id is the cursor: it is globally increasing and
+    survives process restarts, so a client can resume with Last-Event-ID
+    without a per-meeting sequence or an in-memory log. The row is written in
+    the same transaction as the state change it describes; a rollback takes
+    the event with it. It never carries transcript text, audio, speaker
+    labels, object keys, tokens or error messages.
+    """
+
+    __tablename__ = 'resource_events'
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            'users.id',
+            name='fk_resource_events_owner',
+            ondelete='CASCADE',
+        ),
+        nullable=False,
+    )
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id"],
+            ["meetings.owner_user_id", "meetings.id"],
+            name='fk_resource_events_meeting',
+            ondelete='CASCADE',
+        ),
+        CheckConstraint(
+            "event IN ('snapshot', 'meeting.created', 'meeting.updated',"
+            " 'upload.created', 'upload.updated', 'upload.progress',"
+            " 'upload.sealed', 'task.updated', 'transcript.published')",
+            name='ck_resource_events_event',
+        ),
+        Index(
+            'ix_resource_events_owner_meeting_id',
+            "owner_user_id",
+            "meeting_id",
+            "id",
         ),
     )
