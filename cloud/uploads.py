@@ -84,8 +84,14 @@ def _now(ctx: AuthContext) -> datetime:
 
 
 def _find_upload(ctx: AuthContext, upload_id: str) -> UploadSession:
-    upload = ctx.require_db().get(UploadSession, (ctx.user_id, upload_id))
+    db = ctx.require_db()
+    upload = db.get(UploadSession, (ctx.user_id, upload_id))
     if upload is None:
+        raise NotFoundError("upload_not_found")
+    # Every upload route resolves through here, so a deleted meeting fences the
+    # epoch, chunk, ACK and seal paths with one owner-scoped lookup.
+    meeting = db.get(Meeting, (ctx.user_id, upload.meeting_id))
+    if meeting is None or meeting.deleted_at is not None:
         raise NotFoundError("upload_not_found")
     return upload
 

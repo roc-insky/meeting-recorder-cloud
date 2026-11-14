@@ -67,6 +67,9 @@ def resolve_lease(
     )
     if row is None:
         raise NotFoundError("capture_lease_not_found")
+    meeting = db.get(Meeting, (ctx.user_id, row.meeting_id))
+    if meeting is None or meeting.deleted_at is not None:
+        raise NotFoundError("meeting_not_found")
     now = _now(ctx)
     if row.expires_at <= now:
         raise ConflictError("capture_lease_expired")

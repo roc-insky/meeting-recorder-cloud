@@ -24,6 +24,7 @@ from cloud import (
     meetings,
     playback,
     positions,
+    privacy,
     sealing,
     tasks,
     transcripts,
@@ -56,6 +57,15 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
         object_store = deps["object_store"]
     else:
         object_store = object_store_from_env(os.environ)
+    # The audit is deliberately outside PostgreSQL and the object store. A
+    # configured path is mandatory for real use; test/development defaults to
+    # an in-process store so the app still starts without filesystem setup.
+    if "audit_store" in deps:
+        audit_store = deps["audit_store"]
+    elif settings.privacy_audit_path:
+        audit_store = privacy.TombstoneAuditStore(settings.privacy_audit_path)
+    else:
+        audit_store = privacy.MemoryTombstoneStore()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -77,6 +87,8 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
     app.state.clock = clock
     app.state.identity_provider = identity_provider
     app.state.object_store = object_store
+    app.state.audit_store = audit_store
+    privacy.configure_runtime(session_factory, settings, object_store, audit_store)
     # Injected AI/OCR engines. None means the endpoint answers 503
     # ai_not_configured; settings never name a URL or endpoint.
     app.state.ai_provider = deps.get("ai_provider")
@@ -96,8 +108,24 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
             response.headers.setdefault("Cache-Control", "no-store")
         return response
 
+    # Registered last so it runs outermost: during a restore no /api/cloud
+    # request may touch the database or object store at all.
+    @app.middleware("http")
+    async def _maintenance(request: Request, call_next):
+        if settings.privacy_maintenance and (
+            request.url.path == "/api/cloud"
+            or request.url.path.startswith("/api/cloud/")
+        ):
+            return JSONResponse(
+                {"error": "maintenance"},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return await call_next(request)
+
     app.include_router(auth.router)
     app.include_router(meetings.router)
+    app.include_router(privacy.router)
     app.include_router(annotations.router)
     app.include_router(positions.router)
     app.include_router(ai.router)

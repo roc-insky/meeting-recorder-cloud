@@ -92,6 +92,8 @@ class AuthContext:
     clock: Any = field(default=None, repr=False, compare=False)
     settings: Any = field(default=None, repr=False, compare=False)
     objects: Any = field(default=None, repr=False, compare=False)
+    #: Append-only tombstone audit resolved from app.state for privacy calls.
+    audit: Any = field(default=None, repr=False, compare=False)
 
     def require_db(self) -> Any:
         if self.db is None:

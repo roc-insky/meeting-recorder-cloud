@@ -74,6 +74,19 @@ class Settings(BaseModel):
     worker_lease_s: int = Field(default=60, gt=0)
     worker_heartbeat_s: int = Field(default=20, gt=0)
 
+    # -- privacy, tombstones and cleanup (Task 15) ------------------------
+    #: Append-only JSONL tombstone audit. Required in production, where a
+    #: durable path outside the database and object store must be configured
+    #: explicitly; the G1 identity-provider refusal still fires first.
+    privacy_audit_path: str | None = None
+    #: How long a revoked account's still-referenced records are retained
+    #: before run_cleanup may hard-delete them. 0 allows immediate purge.
+    account_revocation_wait_s: int = Field(default=604800, ge=0)
+    #: Root of disposable local scratch files; cleanup never follows symlinks.
+    ephemeral_root: str | None = None
+    #: During a restore the API refuses every /api/cloud request with 503.
+    privacy_maintenance: bool = False
+
     # -- voiceprints (Task 13) -------------------------------------------
     #: Base64url/base64 32-byte AES-GCM key; never rendered by repr().
     voiceprint_key: str | None = Field(default=None, repr=False)
@@ -226,6 +239,14 @@ class Settings(BaseModel):
             public_base_url=env.get("CLOUD_PUBLIC_BASE_URL") or None,
             host=env.get("CLOUD_HOST", "127.0.0.1"),
             port=int(env.get("CLOUD_PORT", "8300")),
+            privacy_audit_path=env.get("CLOUD_PRIVACY_AUDIT_PATH") or None,
+            account_revocation_wait_s=int(
+                env.get("CLOUD_ACCOUNT_REVOCATION_WAIT_S", "604800")
+            ),
+            ephemeral_root=env.get("CLOUD_EPHEMERAL_ROOT") or None,
+            privacy_maintenance=_env_bool(
+                env.get("CLOUD_PRIVACY_MAINTENANCE"), default=False
+            ),
             voiceprint_key=env.get("CLOUD_VOICEPRINT_KEY") or None,
             voiceprint_high_threshold=_env_float(
                 env.get("CLOUD_VOICEPRINT_HIGH_THRESHOLD")

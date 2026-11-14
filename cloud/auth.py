@@ -212,6 +212,10 @@ def _active_session(request: Request, db: Session) -> AuthSession:
     now = _now(request)
     if row is None or row.user_id is None:
         raise UnauthorizedError()
+    user = db.get(User, row.user_id)
+    if user is None or user.deleted_at is not None:
+        # A revoked account must never keep a usable session alive.
+        raise UnauthorizedError()
     if row.consumed_at is not None or row.revoked_at is not None:
         raise UnauthorizedError()
     if row.expires_at <= now:
@@ -232,6 +236,7 @@ def require_user(request: Request, db: Session = Depends(get_db)) -> AuthContext
         clock=request.app.state.clock,
         settings=request.app.state.settings,
         objects=getattr(request.app.state, "object_store", None),
+        audit=getattr(request.app.state, "audit_store", None),
     )
 
 
@@ -373,6 +378,11 @@ def login_callback(
         user = User(id=str(uuid4()), email=email, created_at=now)
         db.add(user)
         db.flush()
+    elif user.deleted_at is not None:
+        # Never resurrect or authenticate a revoked account; the failure stays
+        # generic so it reveals nothing about account existence.
+        db.rollback()
+        raise UnauthorizedError("login_failed")
 
     pending.consumed_at = now
 

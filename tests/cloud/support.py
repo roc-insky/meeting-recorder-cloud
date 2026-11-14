@@ -92,6 +92,10 @@ class CloudCase(unittest.TestCase):
 
     maxDiff = None
 
+    #: PrivacyCase swaps in a durable file store; the default app uses an
+    #: in-process audit, which is enough for every non-privacy test.
+    audit_store: Any = None
+
     @classmethod
     def setUpClass(cls) -> None:
         url = os.environ.get("TEST_DATABASE_URL")
@@ -126,14 +130,14 @@ class CloudCase(unittest.TestCase):
 
     @classmethod
     def _build_app(cls) -> None:
-        cls.app = create_app(
-            cls.settings,
-            {
-                "engine": cls.engine,
-                "clock": cls.clock,
-                "object_store": cls.object_store,
-            },
-        )
+        deps: dict[str, Any] = {
+            "engine": cls.engine,
+            "clock": cls.clock,
+            "object_store": cls.object_store,
+        }
+        if cls.audit_store is not None:
+            deps["audit_store"] = cls.audit_store
+        cls.app = create_app(cls.settings, deps)
         cls.session_factory = cls.app.state.session_factory
 
     def setUp(self) -> None:
@@ -192,6 +196,7 @@ class CloudCase(unittest.TestCase):
         settings: Settings | None = None,
         object_store: Any = _UNSET,
         session_factory: Any = None,
+        audit_store: Any = _UNSET,
         raise_server_exceptions: bool = True,
     ) -> TestClient:
         """Build a second app (same DB and cookies) with injected dependencies.
@@ -208,6 +213,10 @@ class CloudCase(unittest.TestCase):
         }
         if session_factory is not None:
             deps["session_factory"] = session_factory
+        if audit_store is not _UNSET:
+            deps["audit_store"] = audit_store
+        elif self.audit_store is not None:
+            deps["audit_store"] = self.audit_store
         app = create_app(settings or self.settings, deps)
         client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
         for cookie in self.a.cookies.jar:

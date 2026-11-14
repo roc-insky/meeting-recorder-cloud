@@ -663,6 +663,12 @@ def fail_task(
     if task.lease_token_hash != hash_lease_token(lease_token):
         db.rollback()
         return False
+    if task.meeting_id is not None:
+        meeting = db.get(Meeting, (task.owner_user_id, task.meeting_id))
+        if meeting is None or meeting.deleted_at is not None:
+            # A worker finishing after deletion must not write a retry state.
+            db.rollback()
+            return False
 
     task.error_code = error_code
     task.updated_at = now
@@ -711,6 +717,11 @@ def cancel_task(ctx: AuthContext, task_id: str) -> None:
     if task is None:
         db.rollback()
         raise NotFoundError("task_not_found")
+    if task.meeting_id is not None:
+        meeting = db.get(Meeting, (ctx.user_id, task.meeting_id))
+        if meeting is None or meeting.deleted_at is not None:
+            db.rollback()
+            raise NotFoundError("task_not_found")
     if task.status in TERMINAL_STATUSES:
         db.rollback()
         return

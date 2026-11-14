@@ -48,8 +48,15 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    #: Set by account revocation; a deleted user can never authenticate again.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
-    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        Index("ix_users_deleted_at", "deleted_at"),
+    )
 
 
 class AuthSession(Base):
@@ -108,6 +115,7 @@ class Meeting(Base):
 
     __table_args__ = (
         Index("ix_meetings_owner_created_id", "owner_user_id", "created_at", "id"),
+        Index("ix_meetings_deleted_at", "deleted_at"),
         CheckConstraint("mode IN ('mic', 'dual')", name="ck_meetings_mode"),
         CheckConstraint(
             "speakers IS NULL OR (speakers >= 1 AND speakers <= 20)",

@@ -49,6 +49,7 @@ from cloud.schema import (
     ResourceEvent,
     TranscriptVersion,
     UploadSession,
+    User,
 )
 
 router = APIRouter(prefix="/api/cloud", tags=["events"])
@@ -323,6 +324,10 @@ def _poll_once(
             or auth.revoked_at is not None
             or auth.expires_at <= now
         ):
+            return None
+        user = db.get(User, user_id)
+        if user is None or user.deleted_at is not None:
+            # A revoked account closes its live streams on the next poll.
             return None
         meeting = db.get(Meeting, (user_id, meeting_id))
         if meeting is None or meeting.deleted_at is not None:
