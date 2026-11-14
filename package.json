@@ -1,0 +1,14 @@
+{
+  "name": "cloud-meeting-recorder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-side capture, local buffering and upload tests for the cloud meeting recorder.",
+  "scripts": {
+    "test:node": "node --test tests/browser/cloud/*.test.mjs",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.0"
+  }
+}

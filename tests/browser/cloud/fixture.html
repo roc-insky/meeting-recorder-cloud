@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud capture fixture</title>
+  </head>
+  <body>
+    <h1>Cloud capture fixture</h1>
+    <p id="status">fixture ready</p>
+    <script type="module">
+      // No application code and deliberately no Service Worker registration:
+      // private chunks must never land in a shared/public worker cache.
+      window.__fixtureReady = true;
+      document.getElementById("status").textContent = "fixture ready";
+    </script>
+  </body>
+</html>

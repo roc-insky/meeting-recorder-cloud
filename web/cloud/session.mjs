@@ -49,7 +49,8 @@ export function createCloudSession(options = {}) {
     const method = (init.method ?? "GET").toUpperCase();
     const headers = new Headers(init.headers ?? {});
     headers.set("Accept", "application/json");
-    if (init.body !== undefined && init.body !== null && !headers.has("Content-Type")) {
+    const body = encodeBody(init.body);
+    if (body !== undefined && body !== null && !headers.has("Content-Type") && isJsonBody(init.body)) {
       headers.set("Content-Type", "application/json");
     }
     if (UNSAFE_METHODS.has(method)) {
@@ -62,17 +63,14 @@ export function createCloudSession(options = {}) {
       method,
       headers,
       credentials: "same-origin",
-      body:
-        init.body !== undefined && init.body !== null && typeof init.body !== "string"
-          ? JSON.stringify(init.body)
-          : init.body,
+      body,
     });
     const text = await response.text();
-    const body = text ? safeJson(text) : null;
+    const payload = text ? safeJson(text) : null;
     if (!response.ok) {
-      throw new CloudRequestError(response.status, body?.error ?? null, body);
+      throw new CloudRequestError(response.status, payload?.error ?? null, payload);
     }
-    return body;
+    return payload;
   }
 
   return {
@@ -83,11 +81,45 @@ export function createCloudSession(options = {}) {
       if (email) target.searchParams.set("email", email);
       return target.toString();
     },
-    async logout() {
+    async logout(options = {}) {
+      // The hook runs before the request so the caller can stop capture and
+      // record the final tail chunk while the session is still valid.
+      const beforeLogout = options.beforeLogout ?? null;
+      if (beforeLogout) await beforeLogout();
       await request(LOGOUT_PATH, { method: "POST" });
       return null;
     },
   };
+}
+
+// True only for the server's own unauthenticated response, so a transport or
+// unrelated error is never mistaken for an expired session.
+export function isSessionExpired(error) {
+  return error instanceof CloudRequestError && error.status === 401;
+}
+
+function isJsonBody(body) {
+  if (body === undefined || body === null) return false;
+  if (typeof body === "string") return false;
+  return !isRawBody(body);
+}
+
+function isRawBody(body) {
+  if (typeof body !== "object") return false;
+  if (typeof Blob !== "undefined" && body instanceof Blob) return true;
+  if (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) return true;
+  if (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(body)) return true;
+  if (typeof FormData !== "undefined" && body instanceof FormData) return true;
+  if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) return true;
+  if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) return true;
+  return false;
+}
+
+function encodeBody(body) {
+  if (body === undefined || body === null) return body;
+  if (typeof body === "string") return body;
+  if (isRawBody(body)) return body;
+  return JSON.stringify(body);
 }
 
 function safeJson(text) {
