@@ -28,6 +28,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -785,6 +786,54 @@ class ResourceEvent(Base):
             'ix_resource_events_owner_meeting_id',
             "owner_user_id",
             "meeting_id",
+            "id",
+        ),
+    )
+
+
+class Annotation(Base):
+    """One meeting-relative timeline annotation.
+
+    'offset_ms' locates the note on the meeting timeline itself, never in a
+    transcript version's coordinates: re-transcribing, or switching which
+    version the workbench shows, must never move or drop a note. There is
+    deliberately no version_id column and no edit/delete path yet.
+    """
+
+    __tablename__ = "annotations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", name="fk_annotations_owner", ondelete="CASCADE"),
+        nullable=False,
+    )
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    offset_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id"],
+            ["meetings.owner_user_id", "meetings.id"],
+            name="fk_annotations_meeting",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "kind IN ('note', 'highlight', 'comment')",
+            name="ck_annotations_kind",
+        ),
+        CheckConstraint("offset_ms >= 0", name="ck_annotations_offset"),
+        CheckConstraint("length(btrim(text)) > 0", name="ck_annotations_text"),
+        Index(
+            "ix_annotations_owner_meeting_offset",
+            "owner_user_id",
+            "meeting_id",
+            "offset_ms",
             "id",
         ),
     )
