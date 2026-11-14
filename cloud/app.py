@@ -16,12 +16,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from cloud import (
+    ai,
     annotations,
     auth,
     events,
     leases,
     meetings,
     playback,
+    positions,
     sealing,
     tasks,
     transcripts,
@@ -75,6 +77,12 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
     app.state.clock = clock
     app.state.identity_provider = identity_provider
     app.state.object_store = object_store
+    # Injected AI/OCR engines. None means the endpoint answers 503
+    # ai_not_configured; settings never name a URL or endpoint.
+    app.state.ai_provider = deps.get("ai_provider")
+    app.state.ai_ocr_provider = deps.get("ai_ocr_provider")
+    app.state.ai_executor = deps.get("ai_executor")
+    app.state.ai_ocr_executor = deps.get("ai_ocr_executor")
     app.state.dependencies = deps
 
     @app.exception_handler(CloudError)
@@ -91,6 +99,8 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
     app.include_router(auth.router)
     app.include_router(meetings.router)
     app.include_router(annotations.router)
+    app.include_router(positions.router)
+    app.include_router(ai.router)
     app.include_router(events.router)
     app.include_router(uploads.router)
     app.include_router(leases.router)

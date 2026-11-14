@@ -22,6 +22,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # and images at most 5 MiB each (at most five images per interview input).
 IMAGE_MAX_BYTES = 5 * 1024 * 1024
 RESUME_MAX_CHARS = 20000
+IMAGE_TOTAL_MAX_BYTES = 30 * 1024 * 1024
+IMAGE_MAX_PIXELS = 20_000_000
+AI_OUTPUT_MAX_CHARS = 40000
+EPHEMERAL_TIMEOUT_S = 120
+
+#: Provider names an operator may select. A provider instance is always
+#: injected; no HTTP endpoint or URL is ever read from configuration.
+ALLOWED_AI_PROVIDERS = ("disabled", "injected")
 
 _FORBIDDEN_URL_PARTS = re.compile(r"[?#]")
 _PUBLIC_BASE_URL = re.compile(r"^https?://[A-Za-z0-9.\-]+(:[0-9]{1,5})?$")
@@ -59,10 +67,10 @@ class Settings(BaseModel):
     ephemeral_cleanup_s: int = Field(default=3600, gt=0)
     backup_retention_days: int = Field(default=30, gt=0)
     log_retention_days: int = Field(default=30, gt=0)
-    image_max_pixels: int = Field(default=20000000, gt=0)
-    request_max_bytes: int = Field(default=30 * 1024 * 1024, gt=0)
-    ai_output_max_chars: int = Field(default=40000, gt=0)
-    request_timeout_s: int = Field(default=120, gt=0)
+    image_max_pixels: int = Field(default=IMAGE_MAX_PIXELS, gt=0)
+    request_max_bytes: int = Field(default=IMAGE_TOTAL_MAX_BYTES, gt=0)
+    ai_output_max_chars: int = Field(default=AI_OUTPUT_MAX_CHARS, gt=0)
+    request_timeout_s: int = Field(default=EPHEMERAL_TIMEOUT_S, gt=0)
     worker_lease_s: int = Field(default=60, gt=0)
     worker_heartbeat_s: int = Field(default=20, gt=0)
 
@@ -72,6 +80,20 @@ class Settings(BaseModel):
     voiceprint_sample_max_bytes: int = Field(default=10_000_000, gt=0)
     voiceprint_high_threshold: float | None = None
     voiceprint_low_threshold: float | None = None
+
+    # -- ephemeral AI (Task 14) ------------------------------------------
+    #: Selected provider *name* only. The provider object is injected by the
+    #: application; settings never carry a network endpoint or URL.
+    ai_provider: str | None = None
+    ai_model: str | None = Field(default=None, max_length=200)
+    ai_api_key: str | None = Field(default=None, repr=False)
+    ai_timeout_s: int = Field(
+        default=EPHEMERAL_TIMEOUT_S, ge=1, le=EPHEMERAL_TIMEOUT_S
+    )
+    ai_image_max_pixels: int = Field(default=IMAGE_MAX_PIXELS, gt=0)
+    ai_image_total_max_bytes: int = Field(
+        default=IMAGE_TOTAL_MAX_BYTES, gt=0
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -97,6 +119,17 @@ class Settings(BaseModel):
     def _secret_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("secret_key must not be blank")
+        return value
+
+    @field_validator("ai_provider")
+    @classmethod
+    def _ai_provider_is_allowlisted(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        if value not in ALLOWED_AI_PROVIDERS:
+            raise ValueError(
+                "ai_provider must be disabled or an allowlisted injected name"
+            )
         return value
 
     @field_validator("voiceprint_key")
@@ -199,6 +232,21 @@ class Settings(BaseModel):
             ),
             voiceprint_low_threshold=_env_float(
                 env.get("CLOUD_VOICEPRINT_LOW_THRESHOLD")
+            ),
+            ai_provider=env.get("CLOUD_AI_PROVIDER") or None,
+            ai_model=env.get("CLOUD_AI_MODEL") or None,
+            ai_api_key=env.get("CLOUD_AI_API_KEY") or None,
+            ai_timeout_s=int(
+                env.get("CLOUD_AI_TIMEOUT_S", str(EPHEMERAL_TIMEOUT_S))
+            ),
+            ai_output_max_chars=int(
+                env.get("CLOUD_AI_OUTPUT_MAX_CHARS", str(AI_OUTPUT_MAX_CHARS))
+            ),
+            ai_image_max_pixels=int(
+                env.get("CLOUD_AI_IMAGE_MAX_PIXELS", str(IMAGE_MAX_PIXELS))
+            ),
+            ai_image_total_max_bytes=int(
+                env.get("CLOUD_AI_IMAGE_TOTAL_MAX_BYTES", str(IMAGE_TOTAL_MAX_BYTES))
             ),
         )
 

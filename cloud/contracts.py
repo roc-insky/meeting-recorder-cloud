@@ -403,6 +403,32 @@ class PositionView(_Contract):
     requirements: str = Field(min_length=1)
 
 
+class SummaryRequest(_Contract):
+    """Ask for a private, ephemeral summary of one transcript version.
+
+    The version id is explicit so a summary always names the exact text it was
+    produced from; speaker_ids, when present, narrows the segments but never
+    changes the stable speaker ids shown to the model.
+    """
+
+    transcript_version_id: str = Field(min_length=1, max_length=64)
+    speaker_ids: list[str] | None = None
+
+
+class PositionCreate(_Contract):
+    type: Literal["前端", "后端", "客户端", "测试"]
+    title: str = Field(min_length=1, max_length=200)
+    requirements: str = Field(min_length=1, max_length=RESUME_MAX_CHARS)
+
+
+class PositionUpdate(_Contract):
+    type: Literal["前端", "后端", "客户端", "测试"] | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    requirements: str | None = Field(
+        default=None, min_length=1, max_length=RESUME_MAX_CHARS
+    )
+
+
 class AIResult(_Contract):
     markdown: str
     transcript_version_id: str | None = None
@@ -477,3 +503,8 @@ class UnsupportedMediaTypeError(CloudError):
 class ServiceUnavailableError(CloudError):
     status_code = 503
     code = "service_unavailable"
+
+
+class BadGatewayError(CloudError):
+    status_code = 502
+    code = "ai_failed"

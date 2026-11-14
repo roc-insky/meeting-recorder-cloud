@@ -1182,3 +1182,190 @@ textarea {
     padding: 12px;
   }
 }
+
+/* --- Interview (视觉草案，未获 G4 批准) --- */
+
+.interview {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+  max-width: 960px;
+  min-width: 0;
+}
+
+.interview .panel-body {
+  display: grid;
+  gap: 12px;
+}
+
+.interview-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.interview-section-head h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.position-summary {
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--muted-bg);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.position-summary p {
+  margin: 0;
+}
+
+.position-summary p + p {
+  margin-top: 6px;
+}
+
+.position-summary-title {
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.position-summary-meta,
+.position-summary-requirements {
+  color: var(--muted);
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+
+.position-editor {
+  display: grid;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+
+.position-editor h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.file-input {
+  min-height: 44px;
+  padding: 10px;
+}
+
+.image-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.image-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--muted-bg);
+  font-size: 14px;
+  min-width: 0;
+}
+
+.image-name,
+.image-size {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.image-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 16px 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.markdown h1:first-child,
+.markdown h2:first-child,
+.markdown h3:first-child {
+  margin-top: 0;
+}
+
+.markdown p {
+  margin: 0 0 10px;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0 0 10px;
+  padding-left: 1.5em;
+}
+
+.markdown li {
+  margin: 4px 0;
+}
+
+.markdown code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--muted-bg);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+.markdown pre {
+  max-width: 100%;
+  margin: 0 0 12px;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--muted-bg);
+}
+
+.markdown pre code {
+  padding: 0;
+  background: none;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.markdown a {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .interview-section-head .btn {
+    width: 100%;
+  }
+
+  .interview .form-actions .btn {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .interview .panel-body {
+    padding: 12px;
+  }
+}

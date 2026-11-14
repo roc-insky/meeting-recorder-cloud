@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>职位与面试</title>
+    <!-- 视觉草案，未获 G4 批准：本页只落实真实接口、可达性与私密临时生成。 -->
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#interview-root">跳到主要内容</a>
+    <header class="app-header">
+      <p class="brand">云端会议记录</p>
+      <nav class="app-nav" aria-label="主导航">
+        <a href="./index.html">当前会议</a>
+        <a href="./voiceprints.html">声纹登记</a>
+        <a href="./interview.html" aria-current="page">职位与面试</a>
+      </nav>
+      <div id="account" class="account" aria-live="polite"></div>
+    </header>
+    <main id="interview-root" class="voiceprints-root" tabindex="-1"></main>
+    <script type="module">
+      import { mountInterview } from "./interview.mjs";
+      mountInterview(document.getElementById("interview-root"));
+    </script>
+  </body>
+</html>

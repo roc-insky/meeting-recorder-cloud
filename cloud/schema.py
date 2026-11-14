@@ -963,3 +963,52 @@ class VoiceprintEnrollment(Base):
             "sample_bytes >= 0", name="ck_voiceprint_enrollments_sample_bytes"
         ),
     )
+
+
+class Position(Base):
+    """One owner-private interview position.
+
+    Positions are the only persistent rows Task 14 adds. Resumes, OCR text,
+    prompts, images and AI output are never stored: they exist only for the
+    duration of one request.
+    """
+
+    __tablename__ = "positions"
+
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", name="fk_positions_owner", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    requirements: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('前端', '后端', '客户端', '测试')",
+            name="ck_positions_type",
+        ),
+        CheckConstraint(
+            "length(btrim(title)) > 0 AND length(title) <= 200",
+            name="ck_positions_title",
+        ),
+        CheckConstraint(
+            "length(btrim(requirements)) > 0"
+            " AND length(requirements) <= 20000",
+            name="ck_positions_requirements",
+        ),
+        Index(
+            "ix_positions_owner_created",
+            "owner_user_id",
+            "created_at",
+            "id",
+        ),
+    )
