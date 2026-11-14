@@ -226,10 +226,11 @@ def get_snapshot(ctx: AuthContext, meeting_id: str) -> dict[str, Any]:
 
 
 def _snapshot_event(ctx: AuthContext, meeting_id: str) -> EventView:
+    data = get_snapshot(ctx, meeting_id)
     return EventView(
-        cursor=_latest_cursor(ctx.require_db(), ctx.user_id, meeting_id),
+        cursor=int(data["cursor"]),
         event="snapshot",
-        data=get_snapshot(ctx, meeting_id),
+        data=data,
         created_at=iso_utc(ctx.clock.now()),
     )
 

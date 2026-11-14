@@ -231,6 +231,7 @@ class EventsCase(CloudCase):
         self.assertEqual(len(first["items"]), 1)
         snapshot = first["items"][0]
         self.assertEqual(snapshot["event"], "snapshot")
+        self.assertEqual(snapshot["cursor"], snapshot["data"]["cursor"])
         self.assertEqual(snapshot["data"]["meeting"]["id"], meeting_id)
         self.assertGreaterEqual(snapshot["data"]["cursor"], 1)
         self.assertIn(upload_id, [row["id"] for row in snapshot["data"]["uploads"]])
