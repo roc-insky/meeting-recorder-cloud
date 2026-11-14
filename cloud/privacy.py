@@ -572,6 +572,16 @@ def revoke_account(ctx: AuthContext) -> None:
     _delete_prefixes(ctx.objects, record["object_prefixes"])
 
 
+def _voided_tombstone_ids(records: list[dict[str, Any]]) -> set[str]:
+    """Tombstone ids explicitly voided by a later failed commit."""
+
+    return {
+        record["voids"]
+        for record in records
+        if record["kind"] == "void" and isinstance(record.get("voids"), str)
+    }
+
+
 def _replay_meeting(db: Any, record: dict[str, Any], now: datetime) -> None:
     owner = record["owner_user_id"]
     meeting = db.scalars(
@@ -602,11 +612,7 @@ def replay_tombstones(backup_id: str) -> int:
 
     runtime = _require_runtime()
     records = runtime.audit_store.read_all()
-    voided = {
-        record["voids"]
-        for record in records
-        if record["kind"] == "void" and isinstance(record.get("voids"), str)
-    }
+    voided = _voided_tombstone_ids(records)
     ordered = sorted(
         (
             record
@@ -702,9 +708,15 @@ def run_cleanup(now: datetime) -> dict[str, int]:
         "errors": 0,
     }
     records = runtime.audit_store.read_all()
+    # A void means the database deletion never committed, so its prefixes are
+    # still live data. Replay skips these records; cleanup must skip them too.
+    voided = _voided_tombstone_ids(records)
     prefixes: list[str] = []
     for record in records:
-        if record["kind"] in ("meeting", "account"):
+        if (
+            record["kind"] in ("meeting", "account")
+            and record["tombstone_id"] not in voided
+        ):
             prefixes.extend(record["object_prefixes"])
 
     objects = runtime.object_store

@@ -727,6 +727,69 @@ class PrivacyCase(CloudCase):
             )
         )
 
+    def test_voided_tombstone_does_not_delete_live_objects(self) -> None:
+        meeting_id, upload_id, key = self.put_chunk(self.a)
+        now = self.clock.now()
+
+        def meeting_record(
+            meeting: str, upload: str, prefix: str
+        ) -> dict[str, Any]:
+            return {
+                "schema_version": 1,
+                "kind": "meeting",
+                "tombstone_id": str(uuid4()),
+                "owner_user_id": self.a_user_id,
+                "meeting_id": meeting,
+                "occurred_at": now.isoformat().replace("+00:00", "Z"),
+                "generation": 1,
+                "object_prefixes": [prefix],
+                "upload_ids": [upload],
+                "profile_ids": [],
+                "position_ids": [],
+            }
+
+        # A commit failure appends a void; its object prefix is still live data.
+        voided = meeting_record(
+            meeting_id, upload_id, f"chunks/{self.a_user_id}/{upload_id}/"
+        )
+        self.audit_store.append(voided)
+        self.audit_store.append(
+            {
+                "schema_version": 1,
+                "kind": "void",
+                "tombstone_id": str(uuid4()),
+                "owner_user_id": self.a_user_id,
+                "meeting_id": meeting_id,
+                "occurred_at": now.isoformat().replace("+00:00", "Z"),
+                "generation": 0,
+                "object_prefixes": [],
+                "upload_ids": [],
+                "profile_ids": [],
+                "position_ids": [],
+                "voids": voided["tombstone_id"],
+            }
+        )
+
+        counts = run_cleanup(now)
+        self.assertEqual(counts["tombstone_objects_deleted"], 0)
+        self.assertTrue(self.object_store.exists(key))
+        self.assertEqual(self.query_count("chunks"), 1)
+
+        # A genuinely committed tombstone still retries and deletes its prefix.
+        other_meeting, other_upload, other_key = self.put_chunk(self.a)
+        self.audit_store.append(
+            meeting_record(
+                other_meeting,
+                other_upload,
+                f"chunks/{self.a_user_id}/{other_upload}/",
+            )
+        )
+        counts = run_cleanup(now)
+        self.assertEqual(counts["tombstone_objects_deleted"], 1)
+        self.assertFalse(self.object_store.exists(other_key))
+        self.assertTrue(self.object_store.exists(key))
+        self.assertEqual(self.query_count("chunks"), 2)
+
     def test_audit_store_is_durable_and_rejects_tampering(self) -> None:
         meeting_id = self.create_meeting(self.a)
         self.expect(self.delete_http(self.a, meeting_id), 204)
