@@ -13,13 +13,13 @@ process_once path in tests, so no background thread is started at import time.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable
 
 from sqlalchemy.orm import Session
 
-from cloud.contracts import ClaimedTask, NotFoundError, TranscriptView
+from cloud.contracts import AuthContext, ClaimedTask, NotFoundError, TranscriptView
 from cloud.settings import Settings
 from cloud.tasks import claim_task, fail_task, publish_result, read_claimed_task
 
@@ -60,12 +60,13 @@ def open_work(item: WorkItem, *, now: datetime, db: Session) -> ClaimedTask:
 
 
 def process_once(
-    processor: Callable[[WorkItem], TranscriptView],
+    processor: Callable[..., TranscriptView],
     *,
     worker_id: str,
     now: datetime,
     db: Session,
     settings: Settings,
+    context: AuthContext | None = None,
 ) -> bool:
     """Claim at most one task, run the processor, publish or record failure.
 
@@ -86,7 +87,12 @@ def process_once(
         meeting_id=task.meeting_id,
     )
     try:
-        result = processor(item)
+        if context is None:
+            result = processor(item)
+        else:
+            # Rebind the context to the worker's session so speaker rows staged
+            # by the processor are flushed by the same publish transaction.
+            result = processor(item, replace(context, db=db))
     except TransientProcessingError:
         fail_task(
             task.id,

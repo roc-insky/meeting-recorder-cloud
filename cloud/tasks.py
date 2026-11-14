@@ -41,7 +41,15 @@ from cloud.contracts import (
     iso_utc,
 )
 from cloud.leases import hash_lease_token
-from cloud.schema import Meeting, ProcessingTask, TranscriptVersion, UploadSession
+from cloud.schema import (
+    Meeting,
+    MeetingSpeaker,
+    ProcessingTask,
+    TranscriptSegment,
+    TranscriptSpeaker,
+    TranscriptVersion,
+    UploadSession,
+)
 from cloud.settings import Settings
 
 router = APIRouter(prefix="/api/cloud", tags=["tasks"])
@@ -153,7 +161,10 @@ def enqueue_final(
         and latest.input_version == input_version
         and latest.generation == meeting.generation
     )
-    if same_input and (latest.status not in TERMINAL_STATUSES or not force):
+    # A waiting row is always reused: the worker has not started yet.  A forced
+    # submit supersedes a terminal result or a running attempt (the old worker's
+    # publish is fenced by the generation bump below).
+    if same_input and (not force or latest.status == "waiting"):
         db.commit()
         return _view(latest)
 
@@ -379,6 +390,34 @@ def publish_result(
         db.rollback()
         return False
 
+    speaker_ids = {speaker.id for speaker in result.speakers}
+    segment_ids = {segment.id for segment in result.segments}
+    if len(speaker_ids) != len(result.speakers):
+        db.rollback()
+        return False
+    if len(segment_ids) != len(result.segments):
+        db.rollback()
+        return False
+    if result.empty != (len(result.segments) == 0):
+        db.rollback()
+        return False
+    for segment in result.segments:
+        if segment.end_ms < segment.start_ms:
+            db.rollback()
+            return False
+        if segment.speaker_id is not None and segment.speaker_id not in speaker_ids:
+            db.rollback()
+            return False
+
+    # Speaker rows created by the enhancement pipeline are pending in this same
+    # session. Flush them so the child foreign keys below can see them; any
+    # failure rolls the whole publish back, including the meeting pointer.
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return False
+
     db.add(
         TranscriptVersion(
             owner_user_id=task.owner_user_id,
@@ -388,9 +427,64 @@ def publish_result(
             input_version=task.input_version,
             generation=task.generation,
             payload=result.model_dump(mode="json"),
+            status=result.status,
+            empty=result.empty,
+            warnings=list(result.warnings),
             created_at=now,
         )
     )
+    for speaker in result.speakers:
+        identity = db.get(MeetingSpeaker, (task.owner_user_id, speaker.id))
+        if identity is None:
+            # A hand-built or legacy view may name a speaker that the pipeline
+            # never stored. Keep a meeting-scoped identity without an embedding
+            # so the version remains self-describing.
+            db.add(
+                MeetingSpeaker(
+                    owner_user_id=task.owner_user_id,
+                    id=speaker.id,
+                    meeting_id=task.meeting_id,
+                    label=speaker.label,
+                    created_at=now,
+                )
+            )
+        elif identity.meeting_id != task.meeting_id:
+            # A speaker id belongs to exactly one meeting per owner.
+            db.rollback()
+            return False
+    # SQLAlchemy orders inserts by relationships, not by raw composite foreign
+    # keys, so flush the version and any legacy identity rows before the child
+    # rows that reference them.
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return False
+    for speaker in result.speakers:
+        db.add(
+            TranscriptSpeaker(
+                owner_user_id=task.owner_user_id,
+                version_id=result.id,
+                speaker_id=speaker.id,
+                meeting_id=task.meeting_id,
+                label=speaker.label,
+                suspect=speaker.suspect,
+            )
+        )
+    for ordinal, segment in enumerate(result.segments):
+        db.add(
+            TranscriptSegment(
+                owner_user_id=task.owner_user_id,
+                version_id=result.id,
+                id=segment.id,
+                ordinal=ordinal,
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                text=segment.text,
+                speaker_id=segment.speaker_id,
+                track_id=segment.track_id,
+            )
+        )
     task.status = "completed"
     task.completed_at = now
     task.error_code = None

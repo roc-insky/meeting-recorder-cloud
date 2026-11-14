@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -476,6 +477,15 @@ class TranscriptVersion(Base):
     input_version: Mapped[int] = mapped_column(Integer, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="complete"
+    )
+    empty: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    warnings: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -498,11 +508,140 @@ class TranscriptVersion(Base):
             "input_version >= 0 AND generation >= 0",
             name="ck_transcript_versions_counters",
         ),
+        CheckConstraint(
+            "status IN ('complete', 'completed_with_warnings', 'basic_failed')",
+            name="ck_transcript_versions_status",
+        ),
         Index(
             "ix_transcript_versions_owner_meeting_created",
             "owner_user_id",
             "meeting_id",
             "created_at",
+        ),
+    )
+
+
+class MeetingSpeaker(Base):
+    """A meeting-scoped speaker identity, optionally with an embedding.
+
+    Rows are created by the enhancement pipeline (with model metadata and a
+    vector) or by an older hand-published transcript (without them).  Identity
+    is per meeting and owner; ids are never stable across meetings.
+    """
+
+    __tablename__ = "meeting_speakers"
+
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
+    model_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    weights_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dimension: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    preprocess_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    normalization_version: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    calibration_version: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id"],
+            ["meetings.owner_user_id", "meetings.id"],
+            name="fk_meeting_speakers_meeting",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "meeting_id",
+            "id",
+            name="uq_meeting_speakers_owner_meeting_id",
+        ),
+        Index(
+            "ix_meeting_speakers_owner_meeting_created",
+            "owner_user_id",
+            "meeting_id",
+            "created_at",
+        ),
+    )
+
+
+class TranscriptSpeaker(Base):
+    """A speaker identity as published in one transcript version."""
+
+    __tablename__ = "transcript_speakers"
+
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    version_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    speaker_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    suspect: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "version_id"],
+            ["transcript_versions.owner_user_id", "transcript_versions.id"],
+            name="fk_transcript_speakers_version",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id", "speaker_id"],
+            [
+                "meeting_speakers.owner_user_id",
+                "meeting_speakers.meeting_id",
+                "meeting_speakers.id",
+            ],
+            name="fk_transcript_speakers_speaker",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_transcript_speakers_owner_version",
+            "owner_user_id",
+            "version_id",
+        ),
+    )
+
+
+class TranscriptSegment(Base):
+    """One ordered segment of a published transcript version."""
+
+    __tablename__ = "transcript_segments"
+
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    version_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    speaker_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    track_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "version_id"],
+            ["transcript_versions.owner_user_id", "transcript_versions.id"],
+            name="fk_transcript_segments_version",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "ordinal >= 0 AND start_ms >= 0 AND end_ms >= start_ms",
+            name="ck_transcript_segments_order",
+        ),
+        Index(
+            "ix_transcript_segments_owner_version_ordinal",
+            "owner_user_id",
+            "version_id",
+            "ordinal",
         ),
     )
 

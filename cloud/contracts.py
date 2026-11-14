@@ -264,12 +264,18 @@ class ClaimedTask(_Contract):
 # -- transcripts and annotations ------------------------------------------
 
 
+TranscriptStatus = Literal["complete", "completed_with_warnings", "basic_failed"]
+
+
 class Segment(_Contract):
     id: str
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
     text: str
     speaker_id: str | None = None
+    #: Track the ASR draft attributed this segment to.  Provenance only; never
+    #: used as a speaker identity.
+    track_id: str | None = None
 
     @model_validator(mode="after")
     def _ordered(self) -> Self:
@@ -291,6 +297,7 @@ class TranscriptView(_Contract):
     speakers: list[Speaker] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     empty: StrictBool
+    status: TranscriptStatus = "complete"
 
 
 class AnnotationView(_Contract):

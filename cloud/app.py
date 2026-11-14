@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from cloud import auth, leases, meetings, playback, sealing, tasks, uploads
+from cloud import auth, leases, meetings, playback, sealing, tasks, transcripts, uploads
 from cloud.contracts import CloudError
 from cloud.db import create_database_engine, make_session_factory
 from cloud.objects import object_store_from_env
@@ -82,5 +82,6 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
     app.include_router(leases.router)
     app.include_router(sealing.router)
     app.include_router(tasks.router)
+    app.include_router(transcripts.router)
     app.include_router(playback.router)
     return app
