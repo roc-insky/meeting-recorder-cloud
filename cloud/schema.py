@@ -351,3 +351,157 @@ class CaptureLease(Base):
         ),
         Index("ix_capture_leases_owner_expires", "owner_user_id", "expires_at"),
     )
+
+class ProcessingTask(Base):
+    """A durable unit of deferred work, claimed under a fenced lease.
+
+    Task 8 created final transcription tasks; live transcription and voiceprint
+    enrolment reuse the same queue with their own link. owner_user_id is part
+    of every lookup and of the composite keys, so a forged task id or queue
+    message cannot reach another user's payload. lease_token_hash stores only
+    the SHA-256 of the server-generated token, like capture leases.
+    """
+
+    __tablename__ = "processing_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", name="fk_processing_tasks_owner", ondelete="CASCADE"),
+        nullable=False,
+    )
+    meeting_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    upload_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    #: Voiceprint enrolment links its own sample/template, never a meeting.
+    voiceprint_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Chunk count frozen when the input was sealed (design section 7.2).
+    input_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    #: Meeting generation this result may claim; superseding bumps it.
+    generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    #: Number of leases handed out so far (bounded retry fence).
+    attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'waiting'")
+    )
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lease_acquired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Safe, fixed error code only; never an exception message.
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id"],
+            ["meetings.owner_user_id", "meetings.id"],
+            name="fk_processing_tasks_meeting",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id", "upload_session_id"],
+            ["upload_sessions.owner_user_id", "upload_sessions.id"],
+            name="fk_processing_tasks_upload",
+            ondelete="CASCADE",
+        ),
+        # Composite key target for owner-scoped children (transcript versions).
+        UniqueConstraint("owner_user_id", "id", name="uq_processing_tasks_owner_id"),
+        CheckConstraint(
+            "kind IN ('final', 'live', 'voiceprint')",
+            name="ck_processing_tasks_kind",
+        ),
+        CheckConstraint(
+            "(kind = 'voiceprint' AND meeting_id IS NULL"
+            " AND upload_session_id IS NULL AND voiceprint_ref IS NOT NULL)"
+            " OR (kind IN ('final', 'live') AND meeting_id IS NOT NULL"
+            " AND upload_session_id IS NOT NULL AND voiceprint_ref IS NULL)",
+            name="ck_processing_tasks_link",
+        ),
+        CheckConstraint(
+            "status IN ('waiting', 'running', 'completed', 'failed', 'cancelled')",
+            name="ck_processing_tasks_status",
+        ),
+        CheckConstraint(
+            "input_version >= 0 AND generation >= 0 AND attempt >= 0",
+            name="ck_processing_tasks_counters",
+        ),
+        CheckConstraint(
+            "status <> 'running' OR (lease_token_hash IS NOT NULL"
+            " AND lease_worker_id IS NOT NULL AND lease_deadline IS NOT NULL)",
+            name="ck_processing_tasks_lease",
+        ),
+        Index("ix_processing_tasks_status_created", "status", "created_at"),
+        Index("ix_processing_tasks_owner_status", "owner_user_id", "status"),
+        Index(
+            "ix_processing_tasks_meeting_generation", "meeting_id", "generation"
+        ),
+    )
+
+
+class TranscriptVersion(Base):
+    """One published transcript result; a task can be consumed exactly once.
+
+    Task 8 needs a durable publish target so publish_result can prove that a
+    stale, repeated or forged publish writes nothing. Task 10 extends this row
+    with segment/speaker tables; the payload keeps the task result as it was
+    published. task_id is unique, so a second publish for one task can never
+    create a duplicate transcript version.
+    """
+
+    __tablename__ = "transcript_versions"
+
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    input_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id"],
+            ["meetings.owner_user_id", "meetings.id"],
+            name="fk_transcript_versions_meeting",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id", "task_id"],
+            ["processing_tasks.owner_user_id", "processing_tasks.id"],
+            name="fk_transcript_versions_task",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("task_id", name="uq_transcript_versions_task"),
+        CheckConstraint(
+            "input_version >= 0 AND generation >= 0",
+            name="ck_transcript_versions_counters",
+        ),
+        Index(
+            "ix_transcript_versions_owner_meeting_created",
+            "owner_user_id",
+            "meeting_id",
+            "created_at",
+        ),
+    )
