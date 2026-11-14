@@ -103,6 +103,7 @@ async function mockApi(page, options = {}) {
     ]).map((annotation) => ({ ...annotation })),
     annotationRequests: [],
     annotationStatus: options.annotationStatus ?? 201,
+    failMeetingId: options.failMeetingId ?? null,
     audioRequests: 0,
     listRequests: 0,
     sessionRequests: 0,
@@ -218,6 +219,10 @@ async function mockApi(page, options = {}) {
     }
 
     if (method === "GET") {
+      if (meetingId === state.failMeetingId) {
+        await json(route, { code: "internal_error" }, 500);
+        return;
+      }
       await json(route, meeting);
       return;
     }
@@ -257,6 +262,7 @@ test("fits a 320px viewport without horizontal overflow", async ({ page }, testI
   await page.setViewportSize({ width: 320, height: 800 });
   await mockApi(page);
   await openWorkbench(page);
+  await expect(page.getByTestId("transcript-segment")).toHaveCount(2);
 
   const metrics = await page.evaluate(() => {
     const width = document.documentElement.clientWidth;
@@ -269,11 +275,15 @@ test("fits a 320px viewport without horizontal overflow", async ({ page }, testI
         );
       }
     }
+    const timestamp = document.querySelector('[data-testid="segment-seek"]');
     return {
       width,
       scrollWidth: document.documentElement.scrollWidth,
       bodyScrollWidth: document.body.scrollWidth,
       offenders: offenders.slice(0, 10),
+      timestamp: timestamp
+        ? { clientWidth: timestamp.clientWidth, scrollWidth: timestamp.scrollWidth }
+        : null,
     };
   });
 
@@ -281,9 +291,38 @@ test("fits a 320px viewport without horizontal overflow", async ({ page }, testI
   expect(metrics.scrollWidth).toBeLessThanOrEqual(321);
   expect(metrics.bodyScrollWidth).toBeLessThanOrEqual(321);
   expect(metrics.offenders).toEqual([]);
+  expect(metrics.timestamp).not.toBeNull();
+  expect(metrics.timestamp.scrollWidth).toBeLessThanOrEqual(metrics.timestamp.clientWidth + 1);
 
   await page.getByTestId("history-panel").scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath("workbench-320.png"), fullPage: true });
+});
+
+test("fits the 375, 768 and 1280 breakpoints", async ({ page }, testInfo) => {
+  await mockApi(page);
+  await openWorkbench(page);
+
+  for (const width of [375, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(page.getByTestId("transcript-segment")).toHaveCount(2);
+    const metrics = await page.evaluate(() => {
+      const width = document.documentElement.clientWidth;
+      const offenders = [];
+      for (const node of document.querySelectorAll("body *")) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width > 0 && (rect.right > width + 1 || rect.left < -1)) {
+          offenders.push(node.getAttribute("data-testid") || node.tagName);
+        }
+      }
+      return { width, scrollWidth: document.documentElement.scrollWidth, offenders };
+    });
+    expect(metrics.width).toBe(width);
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(width + 1);
+    expect(metrics.offenders).toEqual([]);
+    await expect(page.getByTestId("recording-strip")).toBeVisible();
+    await expect(page.getByTestId("transcript-panel")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("workbench-" + width + ".png"), fullPage: true });
+  }
 });
 
 test("renders untrusted transcript and annotation text as inert text", async ({ page }) => {
@@ -342,8 +381,8 @@ test("history selection changes the viewed transcript but not the active recordi
           },
           processing: { state: "running" },
           tracks: [
-            { id: "mic", source: "mic", state: "recording" },
-            { id: "system", source: "system", state: "recording" },
+            { id: "mic", source: "mic", readyState: "live" },
+            { id: "system", source: "system", readyState: "live" },
           ],
         },
       }),
@@ -368,7 +407,92 @@ test("history selection changes the viewed transcript but not the active recordi
 
   await expect(page.getByTestId("capture-state")).toContainText("正在录音");
   await expect(page.getByTestId("stop-recording")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent("workbench:recording", {
+        detail: {
+          captureRunning: true,
+          activeMeetingId: "m1",
+          capture: { state: "recording" },
+          upload: { state: "uploading", lastAck: { contiguousMs: 12000 } },
+          tracks: [
+            { id: "mic", source: "mic", readyState: "live" },
+            { id: "system", source: "system", readyState: "ended" },
+          ],
+        },
+      }),
+    );
+  });
+  await expect(page.getByTestId("source-mic")).toHaveAttribute("data-source-state", "录音中");
+  await expect(page.getByTestId("source-system")).toHaveAttribute("data-source-state", "已停止");
   expect(state.meetings.length).toBe(2);
+});
+
+test("manual scroll does not follow the tail until asked", async ({ page }) => {
+  const segments = Array.from({ length: 40 }, (_, index) => ({
+    id: "s" + index,
+    start_ms: index * 2000,
+    end_ms: index * 2000 + 1800,
+    text: "第 " + (index + 1) + " 段：这一段足够长，用来撑出可滚动的文字稿区域。",
+    speaker_id: "spk1",
+    track_id: "mic",
+  }));
+  await page.setViewportSize({ width: 375, height: 600 });
+  await mockApi(page, {
+    transcripts: {
+      m1: [makeTranscript({ segments })],
+      m2: [makeTranscript({ id: "t3", meeting_id: "m2", segments: [segments[0]] })],
+    },
+  });
+  await openWorkbench(page);
+
+  const scroller = page.getByTestId("transcript-scroll");
+  const geometry = await scroller.evaluate((node) => {
+    node.scrollTop = 200;
+    node.dispatchEvent(new Event("scroll"));
+    return { height: node.scrollHeight, clientHeight: node.clientHeight, top: node.scrollTop };
+  });
+  expect(geometry.height).toBeGreaterThan(geometry.clientHeight);
+  await expect(page.getByTestId("back-to-latest")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent("workbench:recording", {
+        detail: {
+          captureRunning: true,
+          activeMeetingId: "m1",
+          capture: { state: "recording" },
+          upload: { state: "uploading", lastAck: { contiguousMs: 12000 } },
+          tracks: [{ id: "mic", source: "mic", readyState: "live" }],
+        },
+      }),
+    );
+  });
+  await expect(page.getByTestId("source-mic")).toHaveAttribute("data-source-state", "录音中");
+  const topAfter = await page.getByTestId("transcript-scroll").evaluate((node) => node.scrollTop);
+  expect(Math.abs(topAfter - geometry.top)).toBeLessThanOrEqual(2);
+
+  await page.getByTestId("back-to-latest").click();
+  await expect(page.getByTestId("back-to-latest")).toBeHidden();
+  const atTail = await page.getByTestId("transcript-scroll").evaluate((node) => {
+    const remaining = node.scrollHeight - node.scrollTop - node.clientHeight;
+    return remaining;
+  });
+  expect(atTail).toBeLessThanOrEqual(24);
+});
+
+test("a failed history switch shows an error instead of stale transcript", async ({ page }) => {
+  await mockApi(page, { failMeetingId: "m2" });
+  await openWorkbench(page);
+
+  await expect(page.getByTestId("transcript-version")).toHaveText("t2");
+  await page.getByTestId("history-item").nth(1).click();
+
+  await expect(page.getByTestId("error-state")).toBeVisible();
+  await expect(page.getByTestId("error-state")).toContainText("无法加载工作台");
+  await expect(page.getByTestId("transcript-panel")).toHaveCount(0);
+  await expect(page.getByTestId("history-banner")).toHaveCount(0);
 });
 
 test("seeking from a transcript segment sets audio time and annotation offset", async ({ page }) => {
@@ -536,6 +660,38 @@ test("dark scheme and reduced motion are honoured", async ({ page }) => {
   expect(colors.background).toBe("rgb(17, 24, 20)");
   expect(colors.text).toBe("rgb(237, 245, 239)");
   expect(colors.transition).toBeLessThan(0.05);
+
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent("workbench:recording", {
+        detail: {
+          captureRunning: true,
+          activeMeetingId: "m1",
+          capture: { state: "recording" },
+          tracks: [],
+        },
+      }),
+    );
+  });
+  await expect(page.getByTestId("stop-recording")).toBeVisible();
+  const dangerContrast = await page.evaluate(() => {
+    const button = document.querySelector('[data-testid="stop-recording"]');
+    const style = getComputedStyle(button);
+    const luminance = (value) => {
+      const channels = value.match(/\d+/g).slice(0, 3).map(Number);
+      const linear = (channel) => {
+        const c = channel / 255;
+        return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * linear(channels[0]) + 0.7152 * linear(channels[1]) + 0.0722 * linear(channels[2]);
+    };
+    const foreground = luminance(style.color);
+    const background = luminance(style.backgroundColor);
+    const lighter = Math.max(foreground, background);
+    const darker = Math.min(foreground, background);
+    return (lighter + 0.05) / (darker + 0.05);
+  });
+  expect(dangerContrast).toBeGreaterThanOrEqual(4.5);
 });
 
 test("expired session shows the login gate and no meeting content", async ({ page }) => {

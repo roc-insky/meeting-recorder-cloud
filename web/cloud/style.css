@@ -54,6 +54,11 @@
   box-sizing: border-box;
 }
 
+/* Class-based display rules must not defeat the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
 html {
   -webkit-text-size-adjust: 100%;
 }
@@ -587,7 +592,7 @@ select {
 
 .segment {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr);
   gap: 8px;
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
@@ -622,8 +627,8 @@ select {
 
 .time-button {
   min-height: 44px;
-  min-width: 76px;
-  padding: 4px 6px;
+  min-width: 0;
+  padding: 4px 4px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -795,6 +800,13 @@ textarea {
   background: var(--recording);
 }
 
+@media (prefers-color-scheme: dark) {
+  /* #f87171 is light; white text on it is only 2.77:1. */
+  .btn--danger {
+    color: #2b0b0b;
+  }
+}
+
 .btn[disabled] {
   opacity: 0.6;
   cursor: not-allowed;
@@ -881,11 +893,7 @@ textarea {
   }
 
   .segment {
-    grid-template-columns: 76px minmax(0, 1fr);
-  }
-
-  .time-button {
-    min-width: 0;
+    grid-template-columns: 96px minmax(0, 1fr);
   }
 
   .recording-strip {

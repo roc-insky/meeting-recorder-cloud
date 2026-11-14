@@ -125,14 +125,19 @@ function sourceState(recording, source) {
   if (source === "mic" && recording.permissionError && !track) return "权限未授予";
   if (source === "system" && recording.shareError && !track) return "权限未授予";
   if (!track) return "未采集";
-  const state = String(track.state || "").toLowerCase();
+  const state = String(track.state || track.readyState || "").toLowerCase();
   if (state === "recording" || state === "live" || state === "active" || state === "capturing") {
     return "录音中";
   }
   if (state === "interrupted" || state === "error" || state === "failed") return "中断";
   if (state === "permission_denied" || state === "denied") return "权限未授予";
-  if (state === "stopped" || state === "complete" || state === "completed") return "已停止";
-  return recording.active ? "录音中" : "未采集";
+  if (state === "stopped" || state === "ended" || state === "complete" || state === "completed") {
+    return "已停止";
+  }
+  // track.state is ours; track.readyState is the MediaStreamTrack verb. An
+  // unrecognised state must not be upgraded to "recording" just because the
+  // session says it is active.
+  return "状态未知";
 }
 
 function describeProblem(problem) {
@@ -190,6 +195,8 @@ function sortedAnnotations(annotations) {
       const b = Number(right.offset_ms);
       const offset = (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
       if (offset !== 0) return offset;
+      const created = String(left.created_at || "").localeCompare(String(right.created_at || ""));
+      if (created !== 0) return created;
       return String(left.id || "").localeCompare(String(right.id || ""));
     });
 }
@@ -1433,6 +1440,15 @@ export function mountWorkbench(root, options) {
     if (abortCurrent) abortCurrent();
     const controller = new AbortController();
     abortCurrent = () => controller.abort();
+    const requestedMeetingId = typeof choices.meetingId === "string" ? choices.meetingId : null;
+    if (requestedMeetingId && state.meeting && state.meeting.id !== requestedMeetingId) {
+      // A failed switch must not leave the previous meeting looking current.
+      state.meeting = null;
+      state.transcript = null;
+      state.transcripts = [];
+      state.annotations = [];
+      state.audioUrl = null;
+    }
     state.loading = true;
     state.error = null;
     render();
