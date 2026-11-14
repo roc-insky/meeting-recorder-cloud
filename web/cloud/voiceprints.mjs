@@ -28,6 +28,10 @@ function element(doc, name, attributes = {}, text = "") {
   return node;
 }
 
+function normalizeName(value) {
+  return String(value || "").normalize("NFC").trim();
+}
+
 function shortUserId(userId) {
   const text = String(userId || "");
   return text.length > 16 ? text.slice(0, 12) + "…" : text;
@@ -699,7 +703,7 @@ export function mountVoiceprints(root, options = {}) {
   async function startRecording() {
     if (enroll.recording || enroll.saving || enroll.processing) return;
     clearEnrollError();
-    const name = nameInput.value.trim();
+    const name = normalizeName(nameInput.value);
     if (!name) {
       showEnrollError("请填写姓名（1–100 个字符）。");
       nameInput.focus();
@@ -838,7 +842,7 @@ export function mountVoiceprints(root, options = {}) {
   async function saveRecording() {
     if (!enroll.recording || enroll.saving || enroll.processing) return;
     clearEnrollError();
-    const name = nameInput.value.trim();
+    const name = normalizeName(nameInput.value);
     if (!name) {
       showEnrollError("请填写姓名（1–100 个字符）。");
       nameInput.focus();
@@ -1178,8 +1182,10 @@ export function mountVoiceprints(root, options = {}) {
   cancelButton.addEventListener("click", closeEnrollDialog);
   cancelTaskButton.addEventListener("click", () => void cancelProcessing());
   useReplaceButton.addEventListener("click", () => {
-    const targetName = enroll.conflictName || nameInput.value.trim();
-    const profile = state.profiles.find((item) => item.name === targetName);
+    const targetName = normalizeName(enroll.conflictName || nameInput.value);
+    const profile = state.profiles.find(
+      (item) => normalizeName(item.name) === targetName,
+    );
     if (!profile) {
       showEnrollError("未找到该姓名的有效声纹，请刷新列表后重试。");
       clearConflict();

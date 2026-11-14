@@ -481,6 +481,29 @@ test("a 409 voiceprint_exists asks before replacing instead of silently replacin
   expect(state.enrollmentRequests).toBe(1);
 });
 
+test("unicode-equivalent names still offer the existing profile for replacement", async ({
+  page,
+}) => {
+  await mockApi(page, {
+    conflict: "voiceprint_exists",
+    profiles: [makeProfile({ name: "Caf\u00e9" })],
+  });
+  await installFakeMedia(page);
+  await openVoiceprints(page);
+
+  await page.getByTestId("enroll-open").click();
+  await page.getByTestId("enroll-name").fill("Cafe\u0301");
+  await page.getByTestId("enroll-consent").check();
+  await page.getByTestId("enroll-start").click();
+  await expect(page.getByTestId("record-status")).toHaveText("正在录音");
+  await page.getByTestId("enroll-save").click();
+
+  await expect(page.getByTestId("enroll-conflict")).toBeVisible();
+  await page.getByTestId("enroll-use-replace").click();
+  await expect(page.getByTestId("enroll-name")).toHaveValue("Caf\u00e9");
+  await expect(page.getByTestId("replace-warning")).toContainText("版本 2");
+});
+
 test("fits 320px with the enrollment dialog open", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   const longModel = "ecapa-tdnn-".repeat(12);
