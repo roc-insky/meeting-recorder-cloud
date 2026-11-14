@@ -89,11 +89,17 @@ class AuthContext:
     db: Any = field(default=None, repr=False, compare=False)
     clock: Any = field(default=None, repr=False, compare=False)
     settings: Any = field(default=None, repr=False, compare=False)
+    objects: Any = field(default=None, repr=False, compare=False)
 
     def require_db(self) -> Any:
         if self.db is None:
             raise RuntimeError("AuthContext has no database session")
         return self.db
+
+    def require_objects(self) -> Any:
+        if self.objects is None:
+            raise ServiceUnavailableError("object_store_unavailable")
+        return self.objects
 
 
 # -- meetings --------------------------------------------------------------
@@ -383,3 +389,18 @@ class NotFoundError(CloudError):
 class InvalidRequestError(CloudError):
     status_code = 400
     code = "invalid_request"
+
+
+class ConflictError(CloudError):
+    status_code = 409
+    code = "conflict"
+
+
+class PayloadTooLargeError(CloudError):
+    status_code = 413
+    code = "request_too_large"
+
+
+class ServiceUnavailableError(CloudError):
+    status_code = 503
+    code = "service_unavailable"

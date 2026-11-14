@@ -231,6 +231,7 @@ def require_user(request: Request, db: Session = Depends(get_db)) -> AuthContext
         db=db,
         clock=request.app.state.clock,
         settings=request.app.state.settings,
+        objects=getattr(request.app.state, "object_store", None),
     )
 
 

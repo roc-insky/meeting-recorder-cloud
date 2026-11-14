@@ -5,6 +5,12 @@ test starts from empty tables, so the suite is repeatable. Identity comes from
 the explicitly test-only fake provider because gate G1 (real auth provider) is
 still unanswered; no OAuth secret and no production data are involved.
 
+Object storage is the real MinIO/S3 endpoint configured by ``CLOUD_S3_*``
+(Task 5): the bucket is private and the client is minio-py because boto3 PUT
+hangs against this MinIO build (see progress.md, "Test object store for
+Tasks 5+"). Tests that write objects clear the ``chunks/`` prefix themselves so
+authentication tests never touch the store.
+
 Deterministic time comes from ``FakeClock``; business code must never call
 ``datetime.now()`` directly.
 """
@@ -23,6 +29,7 @@ from sqlalchemy.engine import Engine
 
 from cloud.app import create_app
 from cloud.db import Base, reset_schema
+from cloud.objects import S3Config, S3ObjectStore
 from cloud.settings import Settings
 
 BASE_TIME = datetime(2026, 11, 14, 7, 0, 0, tzinfo=timezone.utc)
@@ -31,6 +38,24 @@ TEST_SECRET = "test-only-secret-key-0123456789abcdef"
 A_EMAIL = "alice" + "@" + "example.test"
 B_EMAIL = "bob" + "@" + "example.test"
 TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+#: Child tables first; CASCADE makes the order advisory rather than required.
+TRUNCATE_TABLES = (
+    "chunks",
+    "upload_epoch_tracks",
+    "upload_epochs",
+    "upload_tracks",
+    "upload_sessions",
+    "capture_leases",
+    "meetings",
+    "sessions",
+    "users",
+)
+TRUNCATE_SQL = (
+    "TRUNCATE TABLE " + ", ".join(TRUNCATE_TABLES) + " RESTART IDENTITY CASCADE"
+)
+
+_UNSET = object()
 
 
 class FakeClock:
@@ -80,6 +105,8 @@ class CloudCase(unittest.TestCase):
             login_state_ttl_s=600,
         )
         cls.clock = FakeClock()
+        cls.s3_config = S3Config.from_env(os.environ)
+        cls.object_store = S3ObjectStore(cls.s3_config)
         cls._build_app()
 
     @classmethod
@@ -88,17 +115,24 @@ class CloudCase(unittest.TestCase):
 
     @classmethod
     def _build_app(cls) -> None:
-        cls.app = create_app(cls.settings, {"engine": cls.engine, "clock": cls.clock})
+        cls.app = create_app(
+            cls.settings,
+            {
+                "engine": cls.engine,
+                "clock": cls.clock,
+                "object_store": cls.object_store,
+            },
+        )
         cls.session_factory = cls.app.state.session_factory
 
     def setUp(self) -> None:
         with self.engine.begin() as connection:
-            connection.execute(
-                text("TRUNCATE TABLE meetings, sessions, users RESTART IDENTITY CASCADE")
-            )
+            connection.execute(text(TRUNCATE_SQL))
         self.clock.set(BASE_TIME)
         self._csrf_tokens: dict[int, str] = {}
         self.app = type(self).app
+        self.object_store = type(self).object_store
+        self.s3_config = type(self).s3_config
         self.anon = TestClient(self.app)
         self.a = self.login(A_EMAIL)
         self.b = self.login(B_EMAIL)
@@ -138,6 +172,40 @@ class CloudCase(unittest.TestCase):
         if token is None:
             raise AssertionError("client was not logged in through CloudCase.login")
         return {"X-CSRF-Token": token}
+
+    # -- alternate app instances (fault injection) ------------------------
+
+    def app_client(
+        self,
+        *,
+        settings: Settings | None = None,
+        object_store: Any = _UNSET,
+        session_factory: Any = None,
+        raise_server_exceptions: bool = True,
+    ) -> TestClient:
+        """Build a second app (same DB and cookies) with injected dependencies.
+
+        The caller's A cookies and CSRF token are copied onto the new client so
+        a request can be made through a store or session factory that fails.
+        """
+        deps: dict[str, Any] = {
+            "engine": self.engine,
+            "clock": self.clock,
+            "object_store": (
+                self.object_store if object_store is _UNSET else object_store
+            ),
+        }
+        if session_factory is not None:
+            deps["session_factory"] = session_factory
+        app = create_app(settings or self.settings, deps)
+        client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
+        for cookie in self.a.cookies.jar:
+            client.cookies.jar.set_cookie(cookie)
+        token = self._csrf_tokens.get(id(self.a))
+        if token is not None:
+            self._csrf_tokens[id(client)] = token
+        self.addCleanup(client.close)
+        return client
 
     # -- business helpers -------------------------------------------------
 
