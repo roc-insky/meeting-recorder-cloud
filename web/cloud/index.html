@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>云端会议工作台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workbench-root">跳到主要内容</a>
+    <header class="app-header">
+      <p class="brand">云端会议记录</p>
+      <div id="account" class="account" aria-live="polite"></div>
+    </header>
+    <main id="workbench-root" class="workbench-root" tabindex="-1"></main>
+    <script type="module">
+      import { mountWorkbench } from "./workbench.mjs";
+      mountWorkbench(document.getElementById("workbench-root"));
+    </script>
+  </body>
+</html>
