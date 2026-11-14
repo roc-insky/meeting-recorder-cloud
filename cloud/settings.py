@@ -10,6 +10,8 @@ Two rules drive this module:
 
 from __future__ import annotations
 
+import base64
+import math
 import os
 import re
 from typing import Literal, Mapping
@@ -64,6 +66,13 @@ class Settings(BaseModel):
     worker_lease_s: int = Field(default=60, gt=0)
     worker_heartbeat_s: int = Field(default=20, gt=0)
 
+    # -- voiceprints (Task 13) -------------------------------------------
+    #: Base64url/base64 32-byte AES-GCM key; never rendered by repr().
+    voiceprint_key: str | None = Field(default=None, repr=False)
+    voiceprint_sample_max_bytes: int = Field(default=10_000_000, gt=0)
+    voiceprint_high_threshold: float | None = None
+    voiceprint_low_threshold: float | None = None
+
     @field_validator("database_url")
     @classmethod
     def _postgres_psycopg_only(cls, value: str) -> str:
@@ -89,6 +98,37 @@ class Settings(BaseModel):
         if not value.strip():
             raise ValueError("secret_key must not be blank")
         return value
+
+    @field_validator("voiceprint_key")
+    @classmethod
+    def _voiceprint_key_is_32_bytes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = decode_voiceprint_key(value)
+        if len(raw) != 32:
+            raise ValueError("voiceprint_key must decode to exactly 32 bytes")
+        return value
+
+    @model_validator(mode="after")
+    def _voiceprint_thresholds_pair(self) -> "Settings":
+        high = self.voiceprint_high_threshold
+        low = self.voiceprint_low_threshold
+        if (high is None) != (low is None):
+            raise ValueError(
+                "voiceprint_high_threshold and voiceprint_low_threshold must be set together"
+            )
+        for name, value in (("high", high), ("low", low)):
+            if value is not None and (
+                not math.isfinite(value) or value < 0.0 or value > 1.0
+            ):
+                raise ValueError(
+                    f"voiceprint_{name}_threshold must be finite and between 0 and 1"
+                )
+        if high is not None and low is not None and high <= low:
+            raise ValueError(
+                "voiceprint_high_threshold must be greater than voiceprint_low_threshold"
+            )
+        return self
 
     @model_validator(mode="after")
     def _budgets_are_coherent(self) -> "Settings":
@@ -124,6 +164,16 @@ class Settings(BaseModel):
             f"identity provider {self.auth_provider!r} is not implemented "
             "(gate G1: real provider not selected)"
         )
+        self._require_voiceprint_key_for_production()
+
+    def _require_voiceprint_key_for_production(self) -> None:
+        # Kept separate from validate_for_startup so the identity-provider gate
+        # (G1) remains the authoritative refusal when no real provider exists.
+        # A future real provider must call this before serving traffic.
+        if self.voiceprint_key is None:
+            raise RuntimeError(
+                "production requires a voiceprint_key for encrypted enrolments"
+            )
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -143,7 +193,31 @@ class Settings(BaseModel):
             public_base_url=env.get("CLOUD_PUBLIC_BASE_URL") or None,
             host=env.get("CLOUD_HOST", "127.0.0.1"),
             port=int(env.get("CLOUD_PORT", "8300")),
+            voiceprint_key=env.get("CLOUD_VOICEPRINT_KEY") or None,
+            voiceprint_high_threshold=_env_float(
+                env.get("CLOUD_VOICEPRINT_HIGH_THRESHOLD")
+            ),
+            voiceprint_low_threshold=_env_float(
+                env.get("CLOUD_VOICEPRINT_LOW_THRESHOLD")
+            ),
         )
+
+
+def decode_voiceprint_key(value: str) -> bytes:
+    """Decode a base64/base64url voiceprint key; padding is optional."""
+    text = value.strip()
+    if not text:
+        raise ValueError("voiceprint_key must not be blank")
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("voiceprint_key must be valid base64") from exc
+
+
+def _env_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _env_bool(value: str | None, *, default: bool) -> bool:

@@ -26,6 +26,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -835,5 +836,130 @@ class Annotation(Base):
             "meeting_id",
             "offset_ms",
             "id",
+        ),
+    )
+
+
+class VoiceprintProfile(Base):
+    """One immutable, owner-private voiceprint version.
+
+    Embeddings are never stored in clear: ``embedding_ciphertext`` is an
+    AES-GCM blob whose associated data binds the owner, profile id and version.
+    Replacing a voiceprint revokes the old row and appends a new version, so a
+    published transcript can always be checked against the exact version it
+    used. Two active rows with the same owner and name are prevented by a
+    partial unique index, making replacement atomic.
+    """
+
+    __tablename__ = "voiceprint_profiles"
+
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            "users.id", name="fk_voiceprint_profiles_owner", ondelete="CASCADE"
+        ),
+        primary_key=True,
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    model_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    model_version: Mapped[str] = mapped_column(String(200), nullable=False)
+    weights_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_rate: Mapped[int] = mapped_column(Integer, nullable=False)
+    preprocess_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    calibration_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revocation_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "name",
+            "version",
+            name="uq_voiceprint_profiles_owner_name_version",
+        ),
+        Index(
+            "uq_voiceprint_profiles_active_name",
+            "owner_user_id",
+            "name",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        Index(
+            "ix_voiceprint_profiles_owner_revoked",
+            "owner_user_id",
+            "revoked_at",
+        ),
+        CheckConstraint("version >= 1", name="ck_voiceprint_profiles_version"),
+        CheckConstraint(
+            "dimension >= 1 AND sample_rate >= 1",
+            name="ck_voiceprint_profiles_metadata",
+        ),
+    )
+
+
+class VoiceprintEnrollment(Base):
+    """One private enrolment attempt linked to a voiceprint processing task.
+
+    The captured sample is encrypted as a whole; it is cleared as soon as the
+    attempt completes, fails or is cancelled. Explicit consent, plus a hash and
+    size audit of the captured sample, stays behind after the terminal
+    transition while the sample bytes themselves do not.
+    """
+
+    __tablename__ = "voiceprint_enrollments"
+
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            "users.id", name="fk_voiceprint_enrollments_owner", ondelete="CASCADE"
+        ),
+        primary_key=True,
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    replace_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    consent: Mapped[str] = mapped_column(Text, nullable=False)
+    sample_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    sample_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    sample_ciphertext: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_voiceprint_enrollments_owner_created",
+            "owner_user_id",
+            "created_at",
+        ),
+        CheckConstraint("version >= 1", name="ck_voiceprint_enrollments_version"),
+        CheckConstraint(
+            "replace_version IS NULL OR replace_version >= 1",
+            name="ck_voiceprint_enrollments_replace",
+        ),
+        CheckConstraint(
+            "sample_bytes >= 0", name="ck_voiceprint_enrollments_sample_bytes"
         ),
     )

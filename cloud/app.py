@@ -26,6 +26,7 @@ from cloud import (
     tasks,
     transcripts,
     uploads,
+    voiceprints,
 )
 from cloud.contracts import CloudError
 from cloud.db import create_database_engine, make_session_factory
@@ -97,4 +98,5 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
     app.include_router(tasks.router)
     app.include_router(transcripts.router)
     app.include_router(playback.router)
+    app.include_router(voiceprints.router)
     return app

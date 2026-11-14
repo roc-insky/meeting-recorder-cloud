@@ -97,6 +97,7 @@ def _claimed(task: ProcessingTask, lease_token: str) -> ClaimedTask:
     assert task.lease_deadline is not None
     return ClaimedTask(
         task=_view(task),
+        kind=task.kind,
         lease_token=lease_token,
         lease_deadline=iso_utc(task.lease_deadline),
     )
@@ -307,6 +308,10 @@ def claim_task(
         )
     )
     for row, status in expired_states:
+        if row.kind == "voiceprint" and status == "failed":
+            from cloud.voiceprints import fail_voiceprint_enrollment
+
+            fail_voiceprint_enrollment(db, row, "lease_expired", now)
         if row.meeting_id is None:
             continue
         events.record(
@@ -499,6 +504,15 @@ def publish_result(
             db.rollback()
             return False
 
+    # A voiceprint usage may have gone stale while the worker was busy. Undo
+    # those labels inside this publish transaction so a revoked profile never
+    # becomes durable as a real name. Read-only and idempotent.
+    from cloud.voiceprints import recheck_voiceprint_usage
+
+    result = recheck_voiceprint_usage(
+        db, result, now=now, owner_user_id=probe.owner_user_id
+    )
+
     # Speaker rows created by the enhancement pipeline are pending in this same
     # session. Flush them so the child foreign keys below can see them; any
     # failure rolls the whole publish back, including the meeting pointer.
@@ -658,6 +672,10 @@ def fail_task(
     else:
         task.status = "failed"
         task.completed_at = now
+        if task.kind == "voiceprint":
+            from cloud.voiceprints import fail_voiceprint_enrollment
+
+            fail_voiceprint_enrollment(db, task, error_code, now)
     if task.meeting_id is not None:
         events.record(
             db,
@@ -701,6 +719,10 @@ def cancel_task(ctx: AuthContext, task_id: str) -> None:
     task.completed_at = now
     task.updated_at = now
     _clear_lease(task)
+    if task.kind == "voiceprint":
+        from cloud.voiceprints import cancel_voiceprint_enrollment
+
+        cancel_voiceprint_enrollment(db, task, now)
     if task.meeting_id is not None:
         events.record(
             db,

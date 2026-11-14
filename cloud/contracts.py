@@ -23,6 +23,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     StrictBool,
     StrictInt,
     field_validator,
@@ -253,10 +254,12 @@ class TaskView(_Contract):
     input_version: int = Field(ge=0)
     generation: int = Field(ge=0)
     status: str = Field(min_length=1, max_length=32)
+    error_code: str | None = None
 
 
 class ClaimedTask(_Contract):
     task: TaskView
+    kind: str = Field(min_length=1, max_length=16)
     lease_token: str = Field(min_length=1)
     lease_deadline: IsoUtc
 
@@ -298,6 +301,17 @@ class TranscriptView(_Contract):
     warnings: list[str] = Field(default_factory=list)
     empty: StrictBool
     status: TranscriptStatus = "complete"
+
+    #: Server-only provenance: which voiceprint version relabelled a speaker.
+    #: Never serialized to the HTTP wire payload.
+    _voiceprint_usages: list["VoiceprintUsage"] = PrivateAttr(default_factory=list)
+
+    def record_voiceprint_usage(self, usage: "VoiceprintUsage") -> None:
+        self._voiceprint_usages.append(usage)
+
+    @property
+    def voiceprint_usages(self) -> list["VoiceprintUsage"]:
+        return list(self._voiceprint_usages)
 
 
 class AnnotationView(_Contract):
@@ -347,12 +361,36 @@ class Embedding(_Contract):
         return self
 
 
+@dataclass(frozen=True)
+class CompatibleProfile:
+    """An active voiceprint whose model metadata exactly matches a speaker."""
+
+    profile_id: str
+    name: str
+    version: int
+    embedding: Embedding
+
+
+@dataclass(frozen=True)
+class VoiceprintUsage:
+    """A speaker relabelling that must be re-validated before publish."""
+
+    speaker_id: str
+    anonymous_label: str
+    profile_id: str
+    profile_version: int
+    #: Server-only owner scope; never serialized into a transcript payload.
+    owner_user_id: str = ""
+
+
 class VoiceprintView(_Contract):
     id: str
     name: str = Field(min_length=1)
     version: int = Field(ge=1)
     metadata: ModelMetadata
     revoked: StrictBool
+    created_at: IsoUtc | None = None
+    captured_at: IsoUtc | None = None
 
 
 # -- interview -------------------------------------------------------------
@@ -429,6 +467,11 @@ class ConflictError(CloudError):
 class PayloadTooLargeError(CloudError):
     status_code = 413
     code = "request_too_large"
+
+
+class UnsupportedMediaTypeError(CloudError):
+    status_code = 415
+    code = "unsupported_media_type"
 
 
 class ServiceUnavailableError(CloudError):

@@ -67,12 +67,19 @@ def process_once(
     db: Session,
     settings: Settings,
     context: AuthContext | None = None,
+    voiceprint_processor: Callable[..., bool] | None = None,
 ) -> bool:
     """Claim at most one task, run the processor, publish or record failure.
 
     Returns True only when a result was actually published. A task that is
     requeued, superseded or cancelled returns False, so a caller can tell a
     real publish from a consumed-but-not-published attempt.
+
+    The optional voiceprint processor receives a WorkItem and, when a context
+    is supplied, the worker-bound AuthContext. Its boolean return is the final
+    result because a voiceprint does not produce a TranscriptView. Without it,
+    a claimed voiceprint task fails with a fixed code rather than corrupting
+    the transcript publish path.
     """
     claimed = claim_task(worker_id, now, db=db, settings=settings)
     if claimed is None:
@@ -86,6 +93,46 @@ def process_once(
         input_version=task.input_version,
         meeting_id=task.meeting_id,
     )
+    if claimed.kind == "voiceprint":
+        if voiceprint_processor is None:
+            fail_task(
+                task.id,
+                claimed.lease_token,
+                transient=False,
+                error_code="no_voiceprint_processor",
+                now=now,
+                db=db,
+                settings=settings,
+            )
+            return False
+        db.info["voiceprint_settings"] = settings
+        try:
+            if context is None:
+                return bool(voiceprint_processor(item))
+            return bool(voiceprint_processor(item, replace(context, db=db)))
+        except TransientProcessingError:
+            fail_task(
+                task.id,
+                claimed.lease_token,
+                transient=True,
+                error_code="transient_failure",
+                now=now,
+                db=db,
+                settings=settings,
+            )
+            return False
+        except Exception:  # noqa: BLE001 - never persist the exception text
+            fail_task(
+                task.id,
+                claimed.lease_token,
+                transient=False,
+                error_code="processing_failed",
+                now=now,
+                db=db,
+                settings=settings,
+            )
+            return False
+
     try:
         if context is None:
             result = processor(item)
@@ -115,6 +162,12 @@ def process_once(
             settings=settings,
         )
         return False
+    if context is not None and claimed.kind == "final":
+        # Apply compatible voiceprints exactly once, after speaker attribution
+        # and before the durable publish re-checks each usage.
+        from cloud.voiceprints import match_profiles
+
+        result = match_profiles(replace(context, db=db), result, None)
     return publish_result(
         task.id,
         claimed.lease_token,

@@ -328,7 +328,7 @@ class AnnotationsMigrationCase(unittest.TestCase):
         self.assertIn("annotations", inspector.get_table_names())
         self.assertEqual(
             self.query_value("SELECT version_num FROM alembic_version"),
-            "0008_annotations",
+            "0009_voiceprints",
         )
 
         columns = {row["name"]: row for row in inspector.get_columns("annotations")}
