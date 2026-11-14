@@ -673,7 +673,13 @@ def fail_task(
     task.error_code = error_code
     task.updated_at = now
     _clear_lease(task)
-    if transient and task.attempt < MAX_ATTEMPTS:
+    if error_code == "decode_busy":
+        # Waiting for the owner's single decode slot is not a processing
+        # failure. The claim already counted an attempt, so give it back:
+        # sustained contention must not exhaust the task's retry budget.
+        task.attempt = max(0, task.attempt - 1)
+        task.status = "waiting"
+    elif transient and task.attempt < MAX_ATTEMPTS:
         task.status = "waiting"
     else:
         task.status = "failed"

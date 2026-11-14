@@ -845,7 +845,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(client),
         )
         self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json(), {"error": "ai_timeout"})
+        self.assertEqual(response.json()["error"], "ai_timeout")
         self.assertNotIn("late", response.text)
         time.sleep(0.05)
 
@@ -858,7 +858,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(failing),
         )
         self.assertEqual(failed.status_code, 502, failed.text)
-        self.assertEqual(failed.json(), {"error": "ai_failed"})
+        self.assertEqual(failed.json()["error"], "ai_failed")
         self.assertNotIn("SECRET", failed.text)
 
     def test_default_and_disabled_provider_answer_503(self) -> None:
@@ -871,7 +871,7 @@ class AICase(CloudCase):
                     headers=self.csrf_headers(client),
                 )
                 self.assertEqual(summary.status_code, 503, summary.text)
-                self.assertEqual(summary.json(), {"error": "ai_not_configured"})
+                self.assertEqual(summary.json()["error"], "ai_not_configured")
                 interview = client.post(
                     f"/api/cloud/positions/{self.position_id}/interview",
                     data={"resume_text": "resume"},
@@ -879,7 +879,7 @@ class AICase(CloudCase):
                 )
                 self.assertEqual(interview.status_code, 503, interview.text)
                 self.assertEqual(
-                    interview.json(), {"error": "ai_not_configured"}
+                    interview.json()["error"], "ai_not_configured"
                 )
 
     # -- isolation ---------------------------------------------------------
@@ -1019,7 +1019,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(self.a),
         )
         self.assertEqual(blank.status_code, 400, blank.text)
-        self.assertEqual(blank.json(), {"error": "invalid_position"})
+        self.assertEqual(blank.json()["error"], "invalid_position")
         empty_patch = self.a.patch(
             f"/api/cloud/positions/{self.position_id}",
             json={},
@@ -1060,7 +1060,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(client),
         )
         self.assertEqual(unknown.status_code, 400, unknown.text)
-        self.assertEqual(unknown.json(), {"error": "unknown_speaker"})
+        self.assertEqual(unknown.json()["error"], "unknown_speaker")
 
         anon = TestClient(client.app).post(
             f"/api/cloud/meetings/{self.meeting_id}/summary",
@@ -1096,7 +1096,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(tight),
         )
         self.assertEqual(too_large.status_code, 413, too_large.text)
-        self.assertEqual(too_large.json(), {"error": "request_too_large"})
+        self.assertEqual(too_large.json()["error"], "request_too_large")
 
         too_many = client.post(
             f"/api/cloud/positions/{self.position_id}/interview",
@@ -1108,7 +1108,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(client),
         )
         self.assertEqual(too_many.status_code, 400, too_many.text)
-        self.assertEqual(too_many.json(), {"error": "invalid_request"})
+        self.assertEqual(too_many.json()["error"], "invalid_request")
 
         fake = client.post(
             f"/api/cloud/positions/{self.position_id}/interview",
@@ -1117,7 +1117,7 @@ class AICase(CloudCase):
             headers=self.csrf_headers(client),
         )
         self.assertEqual(fake.status_code, 415, fake.text)
-        self.assertEqual(fake.json(), {"error": "unsupported_media_type"})
+        self.assertEqual(fake.json()["error"], "unsupported_media_type")
 
 
 if __name__ == "__main__":

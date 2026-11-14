@@ -42,6 +42,7 @@ from cloud.contracts import (
     NotFoundError,
     PayloadTooLargeError,
     ServiceUnavailableError,
+    UnsupportedMediaTypeError,
     Speaker,
     TaskView,
     TranscriptView,
@@ -112,12 +113,31 @@ def _normalise_consent(consent: str) -> str:
     return normalised
 
 
+_IMAGE_SIGNATURES = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+)
+
+
+def _looks_like_image(audio: bytes) -> bool:
+    if audio.startswith(_IMAGE_SIGNATURES):
+        return True
+    if len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WEBP":
+        return True
+    return False
+
+
 def _validate_audio(audio: bytes, settings: Settings) -> bytes:
     if not isinstance(audio, (bytes, bytearray)) or len(audio) == 0:
         raise InvalidRequestError("invalid_voiceprint_audio")
     if len(audio) > settings.voiceprint_sample_max_bytes:
         raise PayloadTooLargeError("voiceprint_sample_too_large")
-    return bytes(audio)
+    value = bytes(audio)
+    if _looks_like_image(value):
+        raise UnsupportedMediaTypeError("unsupported_voiceprint_media")
+    return value
 
 
 def _normalise_content_type(content_type: str | None) -> str:

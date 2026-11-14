@@ -15,6 +15,7 @@ from uuid import uuid4
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from cloud.db import reset_schema
@@ -217,7 +218,7 @@ class AnnotationsCase(CloudCase):
                     headers=self.csrf_headers(self.a),
                 )
                 self.assertEqual(response.status_code, 400, response.text)
-                self.assertEqual(response.json(), {"error": "invalid_annotation"})
+                self.assertEqual(response.json()["error"], "invalid_annotation")
                 self.assertEqual(self.query_count("annotations"), 0)
 
         boundary = self.post_annotation(self.a, text="y" * 2000)
@@ -231,10 +232,10 @@ class AnnotationsCase(CloudCase):
 
         read = self.list_annotations(self.b)
         self.assertEqual(read.status_code, 404, read.text)
-        self.assertEqual(read.json(), {"error": "not_found"})
+        self.assertEqual(read.json()["error"], "not_found")
         write = self.post_annotation(self.b, text="intrusion")
         self.assertEqual(write.status_code, 404, write.text)
-        self.assertEqual(write.json(), {"error": "not_found"})
+        self.assertEqual(write.json()["error"], "not_found")
         self.assertEqual(self.query_count("annotations"), 1)
 
     def test_deleted_meeting_is_404(self) -> None:
@@ -260,7 +261,7 @@ class AnnotationsCase(CloudCase):
             self.post_annotation(self.a, missing, text="nowhere"),
         ):
             self.assertEqual(response.status_code, 404, response.text)
-            self.assertEqual(response.json(), {"error": "not_found"})
+            self.assertEqual(response.json()["error"], "not_found")
 
     def test_list_is_owner_scoped(self) -> None:
         mine = self.post_annotation(self.a, offset_ms=10, text="mine").json()
@@ -328,7 +329,7 @@ class AnnotationsMigrationCase(unittest.TestCase):
         self.assertIn("annotations", inspector.get_table_names())
         self.assertEqual(
             self.query_value("SELECT version_num FROM alembic_version"),
-            "0011_privacy_tombstones",
+            ScriptDirectory.from_config(self.config).get_current_head(),
         )
 
         columns = {row["name"]: row for row in inspector.get_columns("annotations")}

@@ -1020,3 +1020,56 @@ class Position(Base):
             "id",
         ),
     )
+
+
+class RequestRateLimit(Base):
+    """PostgreSQL-shared fixed-window counter, keyed by owner and action.
+
+    No request content is stored: only the server-derived owner, a fixed action
+    name, the window start and an integer count.
+    """
+
+    __tablename__ = "request_rate_limits"
+
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    action: Mapped[str] = mapped_column(String(32), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('chunk_write', 'lease_write', 'task_enqueue',"
+            " 'ai_call', 'playback', 'voiceprint_enroll')",
+            name="ck_request_rate_limits_action",
+        ),
+        CheckConstraint("count >= 0", name="ck_request_rate_limits_count"),
+    )
+
+
+class DecodeSlot(Base):
+    """One active transcribe decode per owner, shared across worker instances.
+
+    The primary key on the owner is the concurrency fence: an expired row can be
+    stolen atomically, while a live row makes a second worker back off.
+    """
+
+    __tablename__ = "decode_slots"
+
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("expires_at > acquired_at", name="ck_decode_slots_window"),
+    )

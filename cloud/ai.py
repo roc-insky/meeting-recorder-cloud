@@ -36,6 +36,7 @@ from cloud.contracts import (
     UnsupportedMediaTypeError,
     _sniff_image,
 )
+from cloud import observability
 from cloud.ephemeral import EphemeralExecutor
 from cloud.schema import (
     Meeting,
@@ -132,11 +133,15 @@ def _call_provider(
         raise ServiceUnavailableError("ai_not_configured")
     runner = executor or EphemeralExecutor(provider, timeout_s=timeout_s)
     try:
-        return runner.run(system, user, list(images))
+        result = runner.run(system, user, list(images))
     except ServiceUnavailableError:
+        observability.emit_metric("ai_provider", 1, {"state": "degraded"})
         raise
     except Exception:
+        observability.emit_metric("ai_provider", 1, {"state": "degraded"})
         raise BadGatewayError("ai_failed") from None
+    observability.emit_metric("ai_provider", 1, {"state": "live"})
+    return result
 
 
 def _call_ocr(
@@ -152,11 +157,15 @@ def _call_ocr(
     try:
         text = runner.run_ocr(list(images))
     except ServiceUnavailableError:
+        observability.emit_metric("ai_provider", 1, {"state": "degraded"})
         raise
     except Exception:
+        observability.emit_metric("ai_provider", 1, {"state": "degraded"})
         raise BadGatewayError("ai_failed") from None
     if not isinstance(text, str):
+        observability.emit_metric("ai_provider", 1, {"state": "degraded"})
         raise BadGatewayError("ai_failed")
+    observability.emit_metric("ai_provider", 1, {"state": "live"})
     return text
 
 

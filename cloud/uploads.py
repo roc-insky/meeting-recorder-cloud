@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import uuid4
@@ -28,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from cloud import events
+from cloud import events, observability
 from cloud.auth import require_csrf, require_user
 from cloud.live import submit_live
 from cloud.contracts import (
@@ -299,6 +300,7 @@ def put_chunk(
     existing = _existing_chunk(ctx, meta)
     if existing is not None:
         if _identical(existing, meta):
+            observability.emit_metric("upload_chunk", 1, {"outcome": "duplicate"})
             return _ack_view(ctx, meta.upload_session_id, duplicate=True)
         raise ConflictError("chunk_conflict")
 
@@ -358,6 +360,7 @@ def put_chunk(
         db.rollback()
         raced = _existing_chunk(ctx, meta)
         if raced is not None and _identical(raced, meta):
+            observability.emit_metric("upload_chunk", 1, {"outcome": "duplicate"})
             return _ack_view(ctx, meta.upload_session_id, duplicate=True)
         raise ConflictError("chunk_conflict") from exc
     except SQLAlchemyError as exc:
@@ -366,6 +369,11 @@ def put_chunk(
         db.rollback()
         raise CloudError("commit_failed") from exc
     ack = _ack_view(ctx, meta.upload_session_id, duplicate=False)
+    observability.emit_metric("upload_chunk", 1, {"outcome": "accepted"})
+    if ack.missing:
+        observability.emit_metric(
+            "upload_chunk_missing", len(ack.missing), {"outcome": "missing"}
+        )
     # The chunk is durable now; live scheduling is an O(1) side channel and
     # must never delay or fail the ACK.
     try:
@@ -703,13 +711,27 @@ async def put_chunk_route(
     if declared is not None and declared.isdigit() and int(declared) > limit:
         raise PayloadTooLargeError()
     body = await read_bounded_body(request, limit)
-    return await run_in_threadpool(
+    started = time.perf_counter()
+    ack = await run_in_threadpool(
         put_chunk, ctx, meta, body, request.headers.get(LEASE_HEADER)
     )
+    observability.emit_metric(
+        "upload_ack_latency_ms",
+        (time.perf_counter() - started) * 1000.0,
+        {"outcome": "ok"},
+    )
+    return ack
 
 
 @router.get("/uploads/{upload_id}/ack", response_model=AckView)
 def get_ack_route(
     upload_id: str, ctx: AuthContext = Depends(require_user)
 ) -> AckView:
-    return get_ack(ctx, upload_id)
+    started = time.perf_counter()
+    ack = get_ack(ctx, upload_id)
+    observability.emit_metric(
+        "upload_ack_latency_ms",
+        (time.perf_counter() - started) * 1000.0,
+        {"outcome": "ok"},
+    )
+    return ack

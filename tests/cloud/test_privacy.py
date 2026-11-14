@@ -92,7 +92,9 @@ class PrivacyCase(CloudCase):
             msg=f"unexpected status {response.status_code}: {response.text}",
         )
         if code is not None:
-            self.assertEqual(response.json(), {"error": code})
+            payload = response.json()
+            self.assertEqual(payload.get("error"), code)
+            self.assertRegex(payload.get("request_id", ""), r"^req_[0-9a-f]{32}$")
         return response
 
     def context(self, user_id: str) -> tuple[Any, AuthContext]:
@@ -900,7 +902,8 @@ class PrivacyCase(CloudCase):
         client = self.app_client(settings=settings)
         blocked = client.get("/api/cloud/auth/session")
         self.assertEqual(blocked.status_code, 503)
-        self.assertEqual(blocked.json(), {"error": "maintenance"})
+        self.assertEqual(blocked.json()["error"], "maintenance")
+        self.assertRegex(blocked.json()["request_id"], r"^req_[0-9a-f]{32}$")
         self.assertEqual(blocked.headers.get("cache-control"), "no-store")
         self.assertEqual(client.get("/").status_code, 404)
         self.assertEqual(client.get("/api/cloudish").status_code, 404)

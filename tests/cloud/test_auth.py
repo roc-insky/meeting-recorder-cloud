@@ -102,7 +102,11 @@ class AuthCase(CloudCase):
         other = self.b.get(f"/api/cloud/meetings/{mid}")
         self.assertEqual(unknown.status_code, 404)
         self.assertEqual(other.status_code, 404)
-        self.assertEqual(unknown.json(), other.json())
+        # The machine code is identical; only the per-request trace id differs.
+        self.assertEqual(unknown.json()["error"], other.json()["error"])
+        self.assertRegex(unknown.json()["request_id"], r"^req_[0-9a-f]{32}$")
+        self.assertRegex(other.json()["request_id"], r"^req_[0-9a-f]{32}$")
+        self.assertNotEqual(unknown.json()["request_id"], other.json()["request_id"])
 
     def test_invalid_speakers(self):
         for value in (0, 21, True, False, "2", 1.5):
@@ -275,7 +279,8 @@ class LoginCase(CloudCase):
         tampered = callback_url.replace("code=", "code=x", 1)
         response = client.get(tampered)
         self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json(), {"error": "login_failed"})
+        self.assertEqual(response.json()["error"], "login_failed")
+        self.assertRegex(response.json()["request_id"], r"^req_[0-9a-f]{32}$")
         self.assertNotIn("alice", response.text)
         self.assertNotIn("example.test", response.text)
 

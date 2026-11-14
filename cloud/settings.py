@@ -74,6 +74,21 @@ class Settings(BaseModel):
     worker_lease_s: int = Field(default=60, gt=0)
     worker_heartbeat_s: int = Field(default=20, gt=0)
 
+    # -- isolation budgets (Task 16) --------------------------------------
+    # Provisional request budgets, not approved capacity or SLAs. One fixed
+    # window is shared by every action; the per-action counts below are
+    # deliberately generous for normal use and are enforced in PostgreSQL.
+    rate_limit_window_s: int = Field(default=60, gt=0)
+    rate_limit_chunk_write: int = Field(default=600, gt=0)
+    rate_limit_lease_write: int = Field(default=120, gt=0)
+    rate_limit_task_enqueue: int = Field(default=120, gt=0)
+    rate_limit_ai_call: int = Field(default=60, gt=0)
+    rate_limit_playback: int = Field(default=600, gt=0)
+    rate_limit_voiceprint_enroll: int = Field(default=30, gt=0)
+    #: A decode slot outlives one worker lease so a live claim is never stolen
+    #: while its task lease is still valid; expiry is always reclaimable.
+    decode_slot_s: int = Field(default=180, gt=0)
+
     # -- privacy, tombstones and cleanup (Task 15) ------------------------
     #: Append-only JSONL tombstone audit. Required in production, where a
     #: durable path outside the database and object store must be configured

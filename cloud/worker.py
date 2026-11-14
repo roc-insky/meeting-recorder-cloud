@@ -15,10 +15,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
+from cloud import limits, observability
 from cloud.contracts import AuthContext, ClaimedTask, NotFoundError, TranscriptView
 from cloud.settings import Settings
 from cloud.tasks import claim_task, fail_task, publish_result, read_claimed_task
@@ -75,14 +76,14 @@ def process_once(
     requeued, superseded or cancelled returns False, so a caller can tell a
     real publish from a consumed-but-not-published attempt.
 
-    The optional voiceprint processor receives a WorkItem and, when a context
-    is supplied, the worker-bound AuthContext. Its boolean return is the final
-    result because a voiceprint does not produce a TranscriptView. Without it,
-    a claimed voiceprint task fails with a fixed code rather than corrupting
-    the transcript publish path.
+    A real per-owner decode slot is taken in PostgreSQL after the claim. If
+    another worker is already decoding for this owner the task is requeued with
+    a fixed code instead of running a second decode. The slot is always
+    released on the way out; expiry is the crash-safe fallback.
     """
     claimed = claim_task(worker_id, now, db=db, settings=settings)
     if claimed is None:
+        observability.emit_metric("task_queue", 1, {"outcome": "empty"})
         return False
     task = claimed.task
     item = WorkItem(
@@ -93,6 +94,66 @@ def process_once(
         input_version=task.input_version,
         meeting_id=task.meeting_id,
     )
+    observability.emit_metric("task_queue", 1, {"outcome": "claimed"})
+    depth = limits.queue_depth(db)
+    observability.emit_metric(
+        "task_queue_depth", depth, {"bucket": limits.depth_bucket(depth)}
+    )
+
+    owner_ctx = (
+        replace(context, db=db, settings=settings)
+        if context is not None and context.user_id == task.owner_user_id
+        else AuthContext(
+            user_id=task.owner_user_id,
+            session_id="",
+            db=db,
+            clock=context.clock if context is not None else (lambda: now),
+            settings=settings,
+            objects=None,
+            audit=None,
+        )
+    )
+    if not limits.acquire_decode_slot(owner_ctx, task.id, now=now):
+        observability.emit_metric("task_queue", 1, {"outcome": "busy"})
+        observability.log_event("worker_busy", request_id=None, code="decode_busy")
+        fail_task(
+            task.id,
+            claimed.lease_token,
+            transient=True,
+            error_code="decode_busy",
+            now=now,
+            db=db,
+            settings=settings,
+        )
+        return False
+    try:
+        return _run_claim(
+            processor,
+            claimed=claimed,
+            task=task,
+            item=item,
+            now=now,
+            db=db,
+            settings=settings,
+            context=context,
+            voiceprint_processor=voiceprint_processor,
+        )
+    finally:
+        limits.release_decode_slot(task.owner_user_id, task.id, db)
+
+
+def _run_claim(
+    processor: Callable[..., TranscriptView],
+    *,
+    claimed: ClaimedTask,
+    task: Any,
+    item: WorkItem,
+    now: datetime,
+    db: Session,
+    settings: Settings,
+    context: AuthContext | None,
+    voiceprint_processor: Callable[..., bool] | None,
+) -> bool:
     if claimed.kind == "voiceprint":
         if voiceprint_processor is None:
             fail_task(
@@ -122,6 +183,7 @@ def process_once(
             )
             return False
         except Exception:  # noqa: BLE001 - never persist the exception text
+            observability.emit_metric("worker_failure", 1, {"stage": "processing"})
             fail_task(
                 task.id,
                 claimed.lease_token,
@@ -141,6 +203,7 @@ def process_once(
             # by the processor are flushed by the same publish transaction.
             result = processor(item, replace(context, db=db))
     except TransientProcessingError:
+        observability.emit_metric("worker_failure", 1, {"stage": "decode"})
         fail_task(
             task.id,
             claimed.lease_token,
@@ -152,6 +215,7 @@ def process_once(
         )
         return False
     except Exception:  # noqa: BLE001 - never persist the exception text
+        observability.emit_metric("worker_failure", 1, {"stage": "processing"})
         fail_task(
             task.id,
             claimed.lease_token,

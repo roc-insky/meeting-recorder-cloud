@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from cloud import limits, observability
 from cloud.contracts import (
     AuthContext,
     ForbiddenError,
@@ -229,7 +230,7 @@ def _active_session(request: Request, db: Session) -> AuthSession:
 def require_user(request: Request, db: Session = Depends(get_db)) -> AuthContext:
     """Resolve the caller from the server-side session, or raise 401."""
     row = _active_session(request, db)
-    return AuthContext(
+    ctx = AuthContext(
         user_id=row.user_id,
         session_id=row.id,
         db=db,
@@ -238,6 +239,11 @@ def require_user(request: Request, db: Session = Depends(get_db)) -> AuthContext
         objects=getattr(request.app.state, "object_store", None),
         audit=getattr(request.app.state, "audit_store", None),
     )
+    # Budgets are enforced centrally before the handler can enqueue a task,
+    # call a provider or write another chunk. Nothing here is read-modify-write
+    # in Python: the counter increment is one PostgreSQL UPSERT.
+    limits.enforce_request_budget(request, ctx)
+    return ctx
 
 
 def require_csrf(
@@ -248,12 +254,22 @@ def require_csrf(
     header = request.headers.get(settings.csrf_header_name)
     cookie = request.cookies.get(settings.csrf_cookie_name)
     if not header or not cookie or not secrets.compare_digest(header, cookie):
-        raise ForbiddenError("csrf_failed")
+        _reject_csrf(request)
     row = ctx.require_db().get(AuthSession, ctx.session_id)
     if row is None or not secrets.compare_digest(row.csrf_token, header):
-        raise ForbiddenError("csrf_failed")
+        _reject_csrf(request)
     _require_same_origin(request, settings)
     return ctx
+
+
+def _reject_csrf(request: Request) -> None:
+    observability.log_event(
+        "csrf_rejected",
+        request_id=observability.get_request_id(request),
+        code="csrf_failed",
+    )
+    observability.emit_metric("access_rejection", 1, {"reason": "csrf"})
+    raise ForbiddenError("csrf_failed")
 
 
 def _require_same_origin(request: Request, settings: Settings) -> None:

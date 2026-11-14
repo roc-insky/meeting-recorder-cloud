@@ -38,7 +38,9 @@ class SealingCase(CloudCase):
             msg=f"unexpected status {response.status_code}: {response.text}",
         )
         if code is not None:
-            self.assertEqual(response.json(), {"error": code})
+            payload = response.json()
+            self.assertEqual(payload.get("error"), code)
+            self.assertRegex(payload.get("request_id", ""), r"^req_[0-9a-f]{32}$")
         return response
 
     def lease(self, client: Any, meeting_id: str) -> str:

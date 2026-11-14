@@ -101,6 +101,12 @@ def enforce_capture_lease(
         )
     )
     if live is None:
+        # No live capture: recovery uploads may omit the token, but a token
+        # that is actually presented must still be valid. Silently treating a
+        # stale/revoked token as recovery would let an expired capture keep
+        # appending under an authorization it no longer has.
+        if token is not None:
+            resolve_lease(ctx, token, meeting_id=meeting_id)
         return
     resolve_lease(ctx, token, meeting_id=meeting_id)
 

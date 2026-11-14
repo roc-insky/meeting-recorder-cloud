@@ -58,6 +58,8 @@ TRUNCATE_TABLES = (
     "upload_tracks",
     "upload_sessions",
     "capture_leases",
+    "request_rate_limits",
+    "decode_slots",
     "meetings",
     "sessions",
     "users",
@@ -198,6 +200,7 @@ class CloudCase(unittest.TestCase):
         session_factory: Any = None,
         audit_store: Any = _UNSET,
         raise_server_exceptions: bool = True,
+        extra_deps: dict[str, Any] | None = None,
     ) -> TestClient:
         """Build a second app (same DB and cookies) with injected dependencies.
 
@@ -217,6 +220,7 @@ class CloudCase(unittest.TestCase):
             deps["audit_store"] = audit_store
         elif self.audit_store is not None:
             deps["audit_store"] = self.audit_store
+        deps.update(extra_deps or {})
         app = create_app(settings or self.settings, deps)
         client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
         for cookie in self.a.cookies.jar:

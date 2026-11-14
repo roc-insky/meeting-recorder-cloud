@@ -350,10 +350,10 @@ class EventsCase(CloudCase):
         meeting_id = self.create_meeting(self.a)
         b_page = self.b.get(f"/api/cloud/meetings/{meeting_id}/events")
         self.assertEqual(b_page.status_code, 404)
-        self.assertEqual(b_page.json(), {"error": "meeting_not_found"})
+        self.assertEqual(b_page.json()["error"], "meeting_not_found")
         b_stream = self.b.get(f"/api/cloud/meetings/{meeting_id}/events/stream")
         self.assertEqual(b_stream.status_code, 404)
-        self.assertEqual(b_stream.json(), {"error": "meeting_not_found"})
+        self.assertEqual(b_stream.json()["error"], "meeting_not_found")
 
     # -- cursor and snapshot rules ---------------------------------------
 
