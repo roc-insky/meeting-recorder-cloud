@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -199,6 +200,22 @@ class Gap(_Contract):
         if self.end_ms < self.start_ms:
             raise ValueError("end_ms must be >= start_ms")
         return self
+
+
+@dataclass(frozen=True)
+class AudioInput:
+    """A decoded input frozen at one input_version.
+
+    rate is the work rate (16 kHz). tracks holds one mono WAV per captured
+    track and mix_path the timeline-aligned mix; both span the same timeline,
+    with explicit silence covering every entry in gaps. Sources are never
+    modified: these are new, derived objects.
+    """
+
+    rate: int
+    tracks: dict[str, Path]
+    mix_path: Path
+    gaps: list[Gap]
 
 
 class AckView(_Contract):

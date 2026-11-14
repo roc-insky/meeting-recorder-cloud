@@ -19,7 +19,9 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Iterator, Mapping
+from uuid import uuid4
 
 from minio import Minio
 from minio.error import S3Error
@@ -27,9 +29,13 @@ from minio.error import S3Error
 from cloud.contracts import CloudError, InvalidRequestError
 
 CHUNK_PREFIX = "chunks/"
+DERIVED_PREFIX = "derived/"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_KIND_PATTERN = re.compile(r"^(mix|track)$")
 _SEQUENCE_WIDTH = 10
 _MISSING_CODES = frozenset({"NoSuchKey", "NoSuchBucket", "NoSuchObject"})
+#: Upper bound on one streamed read, so a response never buffers a whole file.
+STREAM_BLOCK_BYTES = 64 * 1024
 
 
 class ObjectStoreError(CloudError):
@@ -109,6 +115,35 @@ def chunk_object_key(
     )
 
 
+def derived_object_key(
+    owner_user_id: str,
+    meeting_id: str,
+    input_version: int,
+    kind: str,
+    track_id: str | None = None,
+) -> str:
+    """Server-generated key for one derived work/playback asset."""
+    if not _KIND_PATTERN.match(kind):
+        raise InvalidRequestError("invalid_asset_kind")
+    if input_version < 0:
+        raise InvalidRequestError("invalid_input_version")
+    for label, value in (("owner", owner_user_id), ("meeting", meeting_id)):
+        if not _ID_PATTERN.match(value):
+            raise InvalidRequestError(f"invalid_{label}_id")
+    if kind == "mix":
+        if track_id is not None:
+            raise InvalidRequestError("invalid_track_id")
+        suffix = "mix"
+    else:
+        if track_id is None or not _ID_PATTERN.match(track_id):
+            raise InvalidRequestError("invalid_track_id")
+        suffix = f"track-{track_id}"
+    return (
+        f"{DERIVED_PREFIX}{owner_user_id}/{meeting_id}/{input_version}/"
+        f"{suffix}/{uuid4().hex}.wav"
+    )
+
+
 class S3ObjectStore:
     """Thin minio-py client; every call maps transport errors to a 5xx."""
 
@@ -148,7 +183,100 @@ class S3ObjectStore:
         if stat.size != len(body):
             raise ObjectStoreError("object_size_mismatch")
 
+    def put_file_verified(
+        self,
+        key: str,
+        path: Path,
+        sha256: str,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> int:
+        """Upload a file already on disk, hashing it as it streams."""
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(STREAM_BLOCK_BYTES), b""):
+                    digest.update(block)
+                    size += len(block)
+        except OSError as exc:
+            raise ObjectStoreError("unreadable_file") from exc
+        if size == 0:
+            raise ObjectStoreError("empty_body")
+        if not hmac.compare_digest(digest.hexdigest(), sha256):
+            raise ObjectStoreError("checksum_mismatch")
+        try:
+            with open(path, "rb") as handle:
+                self._client.put_object(
+                    self.config.bucket,
+                    key,
+                    handle,
+                    length=size,
+                    content_type=content_type,
+                )
+            stat = self._client.stat_object(self.config.bucket, key)
+        except Exception as exc:  # transport, auth, missing bucket, ...
+            raise ObjectStoreError() from exc
+        if stat.size != size:
+            raise ObjectStoreError("object_size_mismatch")
+        return size
+
     # -- reads and maintenance -------------------------------------------
+
+    def download_to(self, key: str, destination: Path) -> None:
+        """Stream one object to a file without holding it in memory."""
+        try:
+            response = self._client.get_object(self.config.bucket, key)
+            try:
+                with open(destination, "wb") as handle:
+                    for block in iter(
+                        lambda: response.read(STREAM_BLOCK_BYTES), b""
+                    ):
+                        handle.write(block)
+            finally:
+                response.close()
+                response.release_conn()
+        except Exception as exc:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ObjectStoreError() from exc
+
+    def object_size(self, key: str) -> int | None:
+        """Stored byte count, or None when the object does not exist."""
+        try:
+            return self._client.stat_object(self.config.bucket, key).size
+        except S3Error as exc:
+            if exc.code in _MISSING_CODES:
+                return None
+            raise ObjectStoreError() from exc
+        except Exception as exc:
+            raise ObjectStoreError() from exc
+
+    def iter_range(self, key: str, start: int, length: int) -> Iterator[bytes]:
+        """Yield exactly the requested byte window, in bounded blocks."""
+        if start < 0 or length < 0:
+            raise InvalidRequestError("invalid_range")
+        if length == 0:
+            return
+        try:
+            response = self._client.get_object(
+                self.config.bucket, key, offset=start, length=length
+            )
+        except S3Error as exc:
+            raise ObjectStoreError() from exc
+        try:
+            remaining = length
+            while remaining > 0:
+                block = response.read(min(STREAM_BLOCK_BYTES, remaining))
+                if not block:
+                    raise ObjectStoreError("short_read")
+                remaining -= len(block)
+                yield block
+        finally:
+            response.close()
+            response.release_conn()
 
     def get_bytes(self, key: str) -> bytes:
         try:

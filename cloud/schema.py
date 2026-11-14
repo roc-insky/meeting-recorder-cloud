@@ -505,3 +505,78 @@ class TranscriptVersion(Base):
             "created_at",
         ),
     )
+
+
+class DerivedAsset(Base):
+    """A durable, owner-scoped decode product for one frozen input version.
+
+    Task 9 decodes the sealed recording once per input_version into 16 kHz mono
+    WAV work assets. The row records the private object, its hash and its
+    timeline duration, so a worker restart reuses bytes instead of re-encoding,
+    and so playback can serve exactly the asset the transcript was built from.
+    Sources (chunks) are never replaced by these rows.
+    """
+
+    __tablename__ = "derived_assets"
+
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    #: Chunk count frozen at seal time; one asset set per version.
+    input_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    #: Track id for kind='track'; NULL for the single mix of a version.
+    track_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    object_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["owner_user_id", "meeting_id"],
+            ["meetings.owner_user_id", "meetings.id"],
+            name="fk_derived_assets_meeting",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("object_key", name="uq_derived_assets_object_key"),
+        CheckConstraint("kind IN ('mix', 'track')", name="ck_derived_assets_kind"),
+        CheckConstraint(
+            "(kind = 'mix' AND track_id IS NULL)"
+            " OR (kind = 'track' AND track_id IS NOT NULL)",
+            name="ck_derived_assets_track",
+        ),
+        CheckConstraint(
+            "input_version >= 0 AND bytes > 0 AND duration_ms >= 0",
+            name="ck_derived_assets_metrics",
+        ),
+        # Postgres treats NULLs as distinct, so the mix needs its own partial
+        # unique index; both together express one set per input version.
+        Index(
+            "uq_derived_assets_mix",
+            "owner_user_id",
+            "meeting_id",
+            "input_version",
+            unique=True,
+            postgresql_where=text("kind = 'mix'"),
+        ),
+        Index(
+            "uq_derived_assets_track",
+            "owner_user_id",
+            "meeting_id",
+            "input_version",
+            "track_id",
+            unique=True,
+            postgresql_where=text("kind = 'track'"),
+        ),
+        Index(
+            "ix_derived_assets_owner_meeting",
+            "owner_user_id",
+            "meeting_id",
+            "input_version",
+        ),
+    )
