@@ -321,12 +321,13 @@ def create_app(settings: Settings, dependencies: dict[str, Any] | None = None) -
         )
 
     @app.exception_handler(Exception)
-    async def _unhandled_error_handler(request: Request, _exc: Exception) -> JSONResponse:
+    async def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
         request_id = observability.get_request_id(request)
-        observability.log_event("http_unhandled", request_id=request_id)
+        status, code = observability.safe_error(exc)
+        observability.log_event("http_unhandled", request_id=request_id, code=code)
         return JSONResponse(
-            observability.error_payload("internal_error", request_id),
-            status_code=500,
+            observability.error_payload(code, request_id),
+            status_code=status,
             headers={"Cache-Control": "no-store"},
         )
 

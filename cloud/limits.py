@@ -69,6 +69,16 @@ _ROUTE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
     (
         "POST",
+        re.compile(r"^/api/cloud/meetings/[^/]+/transcripts/supplement$"),
+        "task_enqueue",
+    ),
+    (
+        "POST",
+        re.compile(r"^/api/cloud/meetings/[^/]+/transcripts/re-transcribe$"),
+        "task_enqueue",
+    ),
+    (
+        "POST",
         re.compile(r"^/api/cloud/meetings/[^/]+/summary$"),
         "ai_call",
     ),

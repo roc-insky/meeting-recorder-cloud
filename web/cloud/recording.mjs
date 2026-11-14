@@ -120,6 +120,8 @@ export class RecordingSession {
       lastAck: null,
       warning: null,
       error: null,
+      errorCode: null,
+      errorStatus: null,
     };
     this.processing = { state: "not_submitted" };
     this.handle = null;
@@ -411,6 +413,8 @@ export class RecordingSession {
       lastAck: null,
       warning: null,
       error: null,
+      errorCode: null,
+      errorStatus: null,
     };
     this.capture.state = "stopped";
     this.capture.stoppedAt = this.clock.now();
@@ -555,11 +559,16 @@ export class RecordingSession {
     if (this.pump.lastAck) this.upload.lastAck = { ...this.pump.lastAck };
     await this.refreshUploadStats();
     if (!result?.ok) {
-      this.upload.error = result?.error?.message ?? "upload_failed";
+      const failure = result?.error ?? null;
+      this.upload.error = failure?.message ?? "upload_failed";
+      this.upload.errorCode = typeof failure?.code === "string" ? failure.code : null;
+      this.upload.errorStatus = Number.isInteger(failure?.status) ? failure.status : null;
       this.setUploadState("buffered_offline");
       return;
     }
     this.upload.error = null;
+    this.upload.errorCode = null;
+    this.upload.errorStatus = null;
     if (this.upload.pendingChunks > 0) {
       this.setUploadState(this.capture.state === "recording" ? "pending" : "buffered_offline");
       return;

@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -42,6 +43,12 @@ MIC = {"id": "mic", "source": "mic", "codec": CODEC, "sample_rate": 48000}
 STARTED_AT = "2026-11-14T07:00:00Z"
 REQUEST_ID = re.compile(r"^req_[0-9a-f]{32}$")
 SENTINEL = "SENSITIVE-9f4e7d-sentinel"
+WAV_SAMPLE = (
+    b"RIFF\x24\x00\x00\x00WAVEfmt "
+    b"\x10\x00\x00\x00\x01\x00\x01\x00"
+    b"\x80\x3e\x00\x00\x00\x7d\x00\x00"
+    b"\x02\x00\x10\x00data\x00\x00\x00\x00"
+)
 
 
 class SecurityCase(CloudCase):
@@ -156,7 +163,9 @@ class SecurityCase(CloudCase):
             headers=headers,
         )
 
-    def insert_transcript(self, meeting_id: str, owner: str | None = None) -> str:
+    def insert_transcript(
+        self, meeting_id: str, owner: str | None = None, transcript_text: str = "私密转写内容"
+    ) -> str:
         owner = owner or self.a_user_id
         version_id = str(uuid4())
         segment_id = str(uuid4())
@@ -195,7 +204,7 @@ class SecurityCase(CloudCase):
                     "owner": owner,
                     "version": version_id,
                     "segment": segment_id,
-                    "text": "私密转写内容",
+                    "text": transcript_text,
                 },
             )
             connection.execute(
@@ -209,7 +218,12 @@ class SecurityCase(CloudCase):
             )
         return version_id
 
-    def insert_profile(self, owner: str | None = None, name: str = "历史声纹") -> str:
+    def insert_profile(
+        self,
+        owner: str | None = None,
+        name: str = "历史声纹",
+        ciphertext: bytes = b"ciphertext",
+    ) -> str:
         owner = owner or self.a_user_id
         profile_id = str(uuid4())
         now = self.clock.now()
@@ -233,7 +247,7 @@ class SecurityCase(CloudCase):
                     "owner": owner,
                     "id": profile_id,
                     "name": name,
-                    "ciphertext": b"ciphertext",
+                    "ciphertext": ciphertext,
                     "hash": "0" * 64,
                     "now": now,
                 },
@@ -259,7 +273,7 @@ class SecurityCase(CloudCase):
             client.post(
                 "/api/cloud/voiceprints",
                 data={"name": name, "consent": "已获得明确同意"},
-                files={"audio": ("sample.wav", b"synthetic-audio-sample", "audio/wav")},
+                files={"audio": ("sample.wav", WAV_SAMPLE, "audio/wav")},
                 headers=self.csrf_headers(client),
             ),
             201,
@@ -389,6 +403,229 @@ class SecurityCase(CloudCase):
             ("get", "/api/cloud/voiceprints"),
         ):
             self.expect(getattr(self.a, method)(path), 200)
+
+        # Unknown identifiers are indistinguishable from another owner's rows:
+        # 404 before any row is created or mutated.
+        unknown = "00000000-0000-4000-8000-000000000000"
+        before_unknown = {
+            table: self.query_count(table)
+            for table in (
+                "meetings",
+                "upload_sessions",
+                "chunks",
+                "processing_tasks",
+                "transcript_versions",
+                "annotations",
+                "positions",
+                "voiceprint_profiles",
+            )
+        }
+        unknown_operations = (
+            ("get", f"/api/cloud/meetings/{unknown}", None),
+            ("patch", f"/api/cloud/meetings/{unknown}", {"title": "x"}),
+            ("delete", f"/api/cloud/meetings/{unknown}", None),
+            ("get", f"/api/cloud/meetings/{unknown}/audio", None),
+            ("post", "/api/cloud/capture-lease", {"meeting_id": unknown}),
+            ("post", "/api/cloud/uploads", {"meeting_id": unknown}),
+            (
+                "post",
+                f"/api/cloud/uploads/{unknown}/epochs",
+                {
+                    "id": "e1",
+                    "offset_ms": 0,
+                    "uncertainty_ms": 0,
+                    "started_at": STARTED_AT,
+                    "tracks": [dict(MIC)],
+                },
+            ),
+            ("get", f"/api/cloud/uploads/{unknown}/ack", None),
+            (
+                "post",
+                f"/api/cloud/uploads/{unknown}/seal",
+                {"tracks": [], "accept_partial": True},
+            ),
+            ("post", f"/api/cloud/meetings/{unknown}/tasks/final", {"input_version": 1}),
+            ("post", f"/api/cloud/tasks/{unknown}/cancel", None),
+            ("get", f"/api/cloud/meetings/{unknown}/transcripts", None),
+            (
+                "get",
+                f"/api/cloud/meetings/{unknown}/transcripts/{unknown}",
+                None,
+            ),
+            ("post", f"/api/cloud/meetings/{unknown}/transcripts/supplement", None),
+            (
+                "post",
+                f"/api/cloud/meetings/{unknown}/transcripts/re-transcribe",
+                None,
+            ),
+            ("get", f"/api/cloud/meetings/{unknown}/annotations", None),
+            (
+                "post",
+                f"/api/cloud/meetings/{unknown}/annotations",
+                {"kind": "note", "offset_ms": 0, "text": "x"},
+            ),
+            ("patch", f"/api/cloud/positions/{unknown}", {"title": "x"}),
+            ("delete", f"/api/cloud/positions/{unknown}", None),
+            ("post", f"/api/cloud/positions/{unknown}/interview", {"resume": "x"}),
+            (
+                "post",
+                f"/api/cloud/meetings/{unknown}/summary",
+                {"transcript_version_id": unknown},
+            ),
+            ("get", f"/api/cloud/meetings/{unknown}/events", None),
+            ("get", f"/api/cloud/meetings/{unknown}/events/stream", None),
+            ("get", f"/api/cloud/voiceprints/tasks/{unknown}", None),
+            ("post", f"/api/cloud/voiceprints/tasks/{unknown}/cancel", None),
+            ("delete", f"/api/cloud/voiceprints/{unknown}", None),
+        )
+        for method, path, payload in unknown_operations:
+            with self.subTest(scope="unknown", method=method, path=path):
+                kwargs: dict[str, Any] = {"headers": self.csrf_headers(self.a)}
+                if payload is not None:
+                    kwargs["json"] = payload
+                response = getattr(self.a, method)(path, **kwargs)
+                self.assertEqual(
+                    response.status_code,
+                    404,
+                    f"{method} {path}: {response.status_code} {response.text[:400]}",
+                )
+                self.assert_request_id(response)
+        self.assertEqual(
+            {
+                table: self.query_count(table)
+                for table in before_unknown
+            },
+            before_unknown,
+        )
+
+        # Release the first lease so the deleted-meeting fixture can acquire
+        # its own; releasing never deletes the already-ACKed chunk.
+        self.expect(
+            self.a.post(
+                "/api/cloud/capture-lease/release",
+                json={"lease_token": lease},
+                headers=self.csrf_headers(self.a),
+            ),
+            204,
+        )
+
+        # A deleted meeting fences every meeting-scoped operation, including
+        # Range playback, chunk writes and task/transcript mutation. Owner-level
+        # positions and voiceprints deliberately survive this deletion.
+        deleted = self.create_meeting(self.a, title="Deleted matrix")
+        deleted_lease, deleted_upload, deleted_headers = self.open_upload(
+            self.a, deleted
+        )
+        self.expect(self.put_chunk(self.a, deleted_upload, deleted_headers), 200)
+        deleted_annotation = self.expect(
+            self.a.post(
+                f"/api/cloud/meetings/{deleted}/annotations",
+                json={"kind": "note", "offset_ms": 0, "text": "删除前批注"},
+                headers=self.csrf_headers(self.a),
+            ),
+            201,
+        ).json()["id"]
+        deleted_version = self.insert_transcript(deleted)
+        self.expect(
+            self.a.delete(
+                f"/api/cloud/meetings/{deleted}",
+                headers=self.csrf_headers(self.a),
+            ),
+            204,
+        )
+        before_deleted = {
+            table: self.query_count(table)
+            for table in (
+                "meetings",
+                "upload_sessions",
+                "chunks",
+                "processing_tasks",
+                "transcript_versions",
+                "annotations",
+            )
+        }
+        deleted_operations = (
+            ("get", f"/api/cloud/meetings/{deleted}", None),
+            ("patch", f"/api/cloud/meetings/{deleted}", {"title": "x"}),
+            ("delete", f"/api/cloud/meetings/{deleted}", None),
+            ("get", f"/api/cloud/meetings/{deleted}/audio", None),
+            ("post", "/api/cloud/capture-lease", {"meeting_id": deleted}),
+            ("post", "/api/cloud/uploads", {"meeting_id": deleted}),
+            (
+                "post",
+                f"/api/cloud/uploads/{deleted_upload}/epochs",
+                {
+                    "id": "e2",
+                    "offset_ms": 0,
+                    "uncertainty_ms": 0,
+                    "started_at": STARTED_AT,
+                    "tracks": [dict(MIC)],
+                },
+            ),
+            ("get", f"/api/cloud/uploads/{deleted_upload}/ack", None),
+            (
+                "post",
+                f"/api/cloud/uploads/{deleted_upload}/seal",
+                {"tracks": [], "accept_partial": True},
+            ),
+            (
+                "post",
+                f"/api/cloud/meetings/{deleted}/tasks/final",
+                {"input_version": 1},
+            ),
+            ("get", f"/api/cloud/meetings/{deleted}/transcripts", None),
+            (
+                "get",
+                f"/api/cloud/meetings/{deleted}/transcripts/{deleted_version}",
+                None,
+            ),
+            (
+                "post",
+                f"/api/cloud/meetings/{deleted}/transcripts/supplement",
+                None,
+            ),
+            (
+                "post",
+                f"/api/cloud/meetings/{deleted}/transcripts/re-transcribe",
+                None,
+            ),
+            ("get", f"/api/cloud/meetings/{deleted}/annotations", None),
+            (
+                "post",
+                f"/api/cloud/meetings/{deleted}/annotations",
+                {"kind": "note", "offset_ms": 0, "text": "x"},
+            ),
+            (
+                "post",
+                f"/api/cloud/meetings/{deleted}/summary",
+                {"transcript_version_id": deleted_version},
+            ),
+            ("get", f"/api/cloud/meetings/{deleted}/events", None),
+            ("get", f"/api/cloud/meetings/{deleted}/events/stream", None),
+        )
+        for method, path, payload in deleted_operations:
+            with self.subTest(scope="deleted", method=method, path=path):
+                kwargs: dict[str, Any] = {"headers": self.csrf_headers(self.a)}
+                if payload is not None:
+                    kwargs["json"] = payload
+                response = getattr(self.a, method)(path, **kwargs)
+                self.assertEqual(
+                    response.status_code,
+                    404,
+                    f"{method} {path}: {response.status_code} {response.text[:400]}",
+                )
+                self.assert_request_id(response)
+        ranged = self.a.get(
+            f"/api/cloud/meetings/{deleted}/audio", headers={"Range": "bytes=0-3"}
+        )
+        self.assertEqual(ranged.status_code, 404, ranged.text)
+        stale_chunk = self.put_chunk(self.a, deleted_upload, deleted_headers)
+        self.assertEqual(stale_chunk.status_code, 404, stale_chunk.text)
+        self.assertIsNotNone(deleted_annotation)
+        self.assertEqual(
+            {table: self.query_count(table) for table in before_deleted},
+            before_deleted,
+        )
 
     # -- 2. body bound before a complete read -----------------------------
 
@@ -554,6 +791,78 @@ class SecurityCase(CloudCase):
         )
         self.expect(response, 422, "invalid_request")
         self.assertNotIn(SENTINEL, response.text)
+
+        # Secrets carried in cookies, CSRF headers and provider codes are never
+        # echoed in an error body, response header or application log.
+        raw_cookie = self.app_client(raise_server_exceptions=False)
+        raw_cookie.cookies.set("cloud_session", SENTINEL, path="/")
+        response = raw_cookie.get("/api/cloud/meetings")
+        self.expect(response, 401, "authentication_required")
+        self.assertNotIn(SENTINEL, response.text)
+        self.assertNotIn(SENTINEL, response.headers.get("x-request-id", ""))
+
+        bad_csrf = self.app_client(raise_server_exceptions=False)
+        response = bad_csrf.post(
+            "/api/cloud/meetings",
+            json={"title": "x", "mode": "mic"},
+            headers={"X-CSRF-Token": SENTINEL},
+        )
+        self.expect(response, 403, "csrf_failed")
+        self.assertNotIn(SENTINEL, response.text)
+
+        login_client = TestClient(self.app, follow_redirects=False)
+        start = login_client.get("/api/cloud/auth/login", params={"email": A_EMAIL})
+        self.assertEqual(start.status_code, 303, start.text)
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        response = login_client.get(
+            "/api/cloud/auth/callback",
+            params={"code": SENTINEL, "state": state},
+        )
+        self.expect(response, 401, "login_failed")
+        self.assertNotIn(SENTINEL, response.text)
+        login_client.close()
+
+        sentinel_meeting = self.create_meeting(self.a)
+        sentinel_version = self.insert_transcript(sentinel_meeting, transcript_text=SENTINEL)
+        response = self.a.get(
+            f"/api/cloud/meetings/{sentinel_meeting}/transcripts/{sentinel_version}"
+        )
+        self.expect(response, 200)
+        self.assertIn(SENTINEL, response.text)
+        self.assertNotIn(SENTINEL, "\n".join(records))
+
+        sentinel_profile = self.insert_profile(ciphertext=SENTINEL.encode())
+        response = self.a.get("/api/cloud/voiceprints")
+        self.expect(response, 200)
+        self.assertNotIn(SENTINEL, response.text)
+        self.assertNotIn(SENTINEL, "\n".join(records))
+        self.assertIsNotNone(sentinel_profile)
+
+        position = self.create_position(self.a)
+        response = self.a.post(
+            f"/api/cloud/positions/{position}/interview",
+            data={"resume_text": SENTINEL},
+            headers=self.csrf_headers(self.a),
+        )
+        self.assertIn(response.status_code, (502, 503), response.text)
+        self.assertNotIn(SENTINEL, response.text)
+        self.assertNotIn(SENTINEL, "\n".join(records))
+
+        enroll = self.a.post(
+            "/api/cloud/voiceprints",
+            data={"name": "Sentinel sample", "consent": "explicit consent"},
+            files={
+                "audio": (
+                    "sample.wav",
+                    WAV_SAMPLE + SENTINEL.encode("utf-8"),
+                    "audio/wav",
+                )
+            },
+            headers=self.csrf_headers(self.a),
+        )
+        self.expect(enroll, 201)
+        self.assertNotIn(SENTINEL, enroll.text)
+        self.assertNotIn(SENTINEL, "\n".join(records))
 
         class ExplodingFactory:
             def __call__(self) -> Any:
@@ -748,6 +1057,40 @@ class SecurityCase(CloudCase):
         self.expect(self.put_chunk(client, upload, headers, 1, b"second", 3000, 6000), 200)
         self.assertEqual(self.query_count("chunks"), 2)
 
+    def test_transcript_enqueue_routes_share_task_budget(self) -> None:
+        from tests.cloud import test_transcripts
+
+        settings = self.settings.model_copy(update={"rate_limit_task_enqueue": 2})
+        client = self.app_client(settings=settings, raise_server_exceptions=False)
+        first_meeting, _ = test_transcripts.TranscriptsCase.sealed_media(
+            self, client=client, duration_ms=600
+        )
+        supplement = client.post(
+            f"/api/cloud/meetings/{first_meeting}/transcripts/supplement",
+            headers=self.csrf_headers(client),
+        )
+        self.expect(supplement, 200)
+        self.assertEqual(self.query_count("processing_tasks"), 1)
+
+        second_meeting, _ = test_transcripts.TranscriptsCase.sealed_media(
+            self, client=client, duration_ms=600
+        )
+        self.insert_transcript(second_meeting)
+        retranscribe = client.post(
+            f"/api/cloud/meetings/{second_meeting}/transcripts/re-transcribe",
+            headers=self.csrf_headers(client),
+        )
+        self.expect(retranscribe, 200)
+        self.assertEqual(self.query_count("processing_tasks"), 2)
+
+        throttled = client.post(
+            f"/api/cloud/meetings/{second_meeting}/transcripts/re-transcribe",
+            headers=self.csrf_headers(client),
+        )
+        self.expect(throttled, 429, "rate_limited")
+        self.assertGreaterEqual(int(throttled.headers.get("retry-after", "0")), 1)
+        self.assertEqual(self.query_count("processing_tasks"), 2)
+
     # -- 6. one real decode slot per owner --------------------------------
 
     def test_concurrent_decode_is_limited(self) -> None:
@@ -918,7 +1261,7 @@ class SecurityCase(CloudCase):
                 files={
                     "audio": (
                         "../../evil.wav",
-                        b"synthetic-audio-sample",
+                        WAV_SAMPLE,
                         "audio/wav",
                     )
                 },

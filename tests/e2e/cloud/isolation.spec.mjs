@@ -831,11 +831,12 @@ test("expired and throttled sessions stay visibly failed and never claim success
     expect(throttled.snapshot.upload.state).toBe("buffered_offline");
     expect(throttled.snapshot.upload.error).toContain("429");
     expect(throttled.snapshot.upload.error).toContain("rate_limited");
+    expect(throttled.snapshot.upload.errorCode).toBe("rate_limited");
     expect(throttled.stats.chunks).toBeGreaterThan(0);
     expect(throttled.warningHidden).toBe(true);
     expect(throttled.errorHidden).toBe(false);
-    expect(throttled.errorText).toContain("429");
     expect(throttled.errorText).toContain("rate_limited");
+    expect(throttled.errorText).toContain("请求过于频繁，请稍后重试");
     expect(throttled.innerText).not.toContain("上传成功");
     expect(throttled.innerText).not.toContain("保存成功");
     expect(throttled.innerText).not.toContain("录音已保存");

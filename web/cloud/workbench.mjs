@@ -73,6 +73,8 @@ export function normalizeRecording(recording) {
       contiguousMs: null,
       pendingBytes: 0,
       uploadError: null,
+      uploadErrorCode: null,
+      uploadErrorStatus: null,
       warning: null,
       tracks: [],
       processing: null,
@@ -109,6 +111,8 @@ export function normalizeRecording(recording) {
     contiguousMs: Number.isFinite(contiguous) && contiguous >= 0 ? contiguous : null,
     pendingBytes: Number.isFinite(pending) && pending > 0 ? pending : 0,
     uploadError: upload.error || null,
+    uploadErrorCode: asString(upload.errorCode),
+    uploadErrorStatus: Number.isInteger(upload.errorStatus) ? upload.errorStatus : null,
     warning: upload.warning || (Array.isArray(recording.warnings) ? recording.warnings[0] : null) || null,
     tracks,
     processing:
@@ -365,7 +369,10 @@ function fillRecordingStrip(strip, doc, state) {
 
   const errorEl = strip.querySelector('[data-testid="upload-error"]');
   if (errorEl) {
-    const text = describeProblem(recording.uploadError);
+    const text =
+      recording.uploadErrorCode === "rate_limited"
+        ? "请求过于频繁，请稍后重试（rate_limited）"
+        : describeProblem(recording.uploadError);
     errorEl.textContent = text ? "上传错误：" + text : "";
     errorEl.hidden = text === "";
   }

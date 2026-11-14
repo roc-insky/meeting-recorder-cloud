@@ -69,6 +69,15 @@ from tests.cloud import test_transcripts
 KEY_BYTES = b"v" * 32
 KEY = base64.urlsafe_b64encode(KEY_BYTES).decode("ascii")
 OTHER_KEY = base64.urlsafe_b64encode(b"w" * 32).decode("ascii")
+#: Minimal PCM/16-bit mono WAV header plus an empty data chunk. The server only
+#: sniffs container signatures, so this is enough to prove real audio bytes pass
+#: while an extension or upload content type never does.
+WAV_SAMPLE = (
+    b"RIFF\x24\x00\x00\x00WAVEfmt "
+    b"\x10\x00\x00\x00\x01\x00\x01\x00"
+    b"\x80\x3e\x00\x00\x00\x7d\x00\x00"
+    b"\x02\x00\x10\x00data\x00\x00\x00\x00"
+)
 META = ModelMetadata(
     model_id="fake-voiceprint",
     model_version="1",
@@ -153,7 +162,7 @@ class VoiceprintsCase(CloudCase):
         name: str = "Alice Example",
         *,
         consent: str = "I consent to a private voiceprint for my own meetings.",
-        audio: bytes = b"synthetic-audio-sample",
+        audio: bytes = WAV_SAMPLE,
         replace_version: int | None = None,
         content_type: str | None = "audio/wav",
     ) -> TaskView:
@@ -204,7 +213,7 @@ class VoiceprintsCase(CloudCase):
         *,
         vector: list[float] | None = None,
         metadata: ModelMetadata = META,
-        audio: bytes = b"synthetic-audio-sample",
+        audio: bytes = WAV_SAMPLE,
         replace_version: int | None = None,
         content_type: str | None = "audio/wav",
     ) -> tuple[TaskView, VoiceprintProfile]:
@@ -388,7 +397,7 @@ class VoiceprintsCase(CloudCase):
             self.assertEqual(caught.exception.code, "voiceprint_exists")
 
     def test_consent_persisted_with_sample_audit(self) -> None:
-        sample = b"consent-audited-sample"
+        sample = WAV_SAMPLE
         with self.session() as db:
             ctx = self.context(db)
             task = self.enroll(
@@ -425,7 +434,7 @@ class VoiceprintsCase(CloudCase):
 
     def test_invalid_name_consent_audio_and_oversize(self) -> None:
         with self.session() as db:
-            ctx = self.context(db, settings=self.vp_settings(voiceprint_sample_max_bytes=4))
+            ctx = self.context(db, settings=self.vp_settings(voiceprint_sample_max_bytes=64))
             cases = [
                 ({"name": ""}, InvalidRequestError, "invalid_voiceprint_name"),
                 ({"name": "x" * 101}, InvalidRequestError, "invalid_voiceprint_name"),
@@ -438,14 +447,14 @@ class VoiceprintsCase(CloudCase):
                     kwargs: dict[str, Any] = {
                         "name": "Valid Name",
                         "consent": "valid consent",
-                        "audio": b"abcd",
+                        "audio": WAV_SAMPLE,
                     }
                     kwargs.update(overrides)
                     with self.assertRaises(expected) as caught:
                         self.enroll(ctx, **kwargs)
                     self.assertEqual(caught.exception.code, code)
             with self.assertRaises(PayloadTooLargeError) as oversized:
-                self.enroll(ctx, "Valid Name", audio=b"abcde")
+                self.enroll(ctx, "Valid Name", audio=WAV_SAMPLE + b"x" * 100)
             self.assertEqual(oversized.exception.code, "voiceprint_sample_too_large")
             self.assertEqual(
                 db.execute(select(VoiceprintEnrollment)).scalars().all(), []
@@ -463,7 +472,7 @@ class VoiceprintsCase(CloudCase):
             self.assertEqual(list_profiles(ctx), [])
 
     def test_samples_and_embeddings_encrypted_at_rest(self) -> None:
-        sample = b"never-store-this-plaintext-sample"
+        sample = WAV_SAMPLE + b"never-store-this-plaintext-sample"
         with self.session() as db:
             ctx = self.context(db)
             task = self.enroll(ctx, "Encrypted", audio=sample)
@@ -525,7 +534,7 @@ class VoiceprintsCase(CloudCase):
     def test_extraction_and_invalid_embedding_fail_clears_sample(self) -> None:
         with self.session() as db:
             ctx = self.context(db)
-            failed_task = self.enroll(ctx, "Extractor Fails", audio=b"first-sample")
+            failed_task = self.enroll(ctx, "Extractor Fails", audio=WAV_SAMPLE + b"\x00")
             claimed = self.claim_next(ctx)
             self.assertFalse(
                 self.process_claimed(
@@ -540,7 +549,7 @@ class VoiceprintsCase(CloudCase):
             self.assertIsNone(row.sample_ciphertext)
             self.assertEqual(row.error_code, VOICEPRINT_EXTRACTION_FAILED)
 
-            invalid_task = self.enroll(ctx, "Invalid Vector", audio=b"second-sample")
+            invalid_task = self.enroll(ctx, "Invalid Vector", audio=WAV_SAMPLE + b"\x00\x01")
             claimed = self.claim_next(ctx)
             invalid = Embedding.model_construct(vector=[1.0, 0.0], metadata=META)
             self.assertFalse(
@@ -583,7 +592,7 @@ class VoiceprintsCase(CloudCase):
     def test_cancel_pending_clears_sample_and_task(self) -> None:
         with self.session() as db:
             ctx = self.context(db)
-            task = self.enroll(ctx, "Cancelled", audio=b"cancel-this-sample")
+            task = self.enroll(ctx, "Cancelled", audio=WAV_SAMPLE + b"\x02")
             enrollment_id = db.execute(
                 select(ProcessingTask.voiceprint_ref).where(
                     ProcessingTask.id == task.id
@@ -601,7 +610,7 @@ class VoiceprintsCase(CloudCase):
     def test_expired_lease_retries_then_terminal_cleanup(self) -> None:
         with self.session() as db:
             ctx = self.context(db)
-            task = self.enroll(ctx, "Expiring", audio=b"expiry-sample")
+            task = self.enroll(ctx, "Expiring", audio=WAV_SAMPLE + b"\x03")
             claimed = self.claim_next(ctx)
             db.execute(
                 update(ProcessingTask)
@@ -891,12 +900,12 @@ class VoiceprintsCase(CloudCase):
     # -- HTTP API ---------------------------------------------------------
 
     def test_http_enrollment_validation_list_cancel_and_isolation(self) -> None:
-        settings = self.vp_settings(voiceprint_sample_max_bytes=8)
+        settings = self.vp_settings(voiceprint_sample_max_bytes=64)
         client = self.app_client(settings=settings)
         response = client.post(
             "/api/cloud/voiceprints",
             data={"name": "HTTP Name", "consent": "explicit consent"},
-            files={"audio": ("sample.wav", b"12345678", "audio/wav")},
+            files={"audio": ("sample.wav", WAV_SAMPLE, "audio/wav")},
             headers=self.csrf_headers(client),
         )
         self.assertEqual(response.status_code, 201, response.text)
@@ -931,7 +940,7 @@ class VoiceprintsCase(CloudCase):
             ),
             (
                 {"data": {"name": "Too Large", "consent": "ok"},
-                 "files": {"audio": ("a.wav", b"123456789", "audio/wav")}},
+                 "files": {"audio": ("a.wav", b"x" * 65, "audio/wav")}},
                 413,
             ),
         ):

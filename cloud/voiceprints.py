@@ -113,20 +113,21 @@ def _normalise_consent(consent: str) -> str:
     return normalised
 
 
-_IMAGE_SIGNATURES = (
-    b"\x89PNG\r\n\x1a\n",
-    b"\xff\xd8\xff",
-    b"GIF87a",
-    b"GIF89a",
-)
+#: Container signatures accepted before the extractor ever sees bytes.
+#: This is an allowlist, not a decoder: an extension or upload content type is
+#: never trusted, and arbitrary non-audio bytes are refused with a fixed 415.
+_AUDIO_SIGNATURES = (b"\x1aE\xdf\xa3", b"OggS", b"ID3", b"fLaC")
 
 
-def _looks_like_image(audio: bytes) -> bool:
-    if audio.startswith(_IMAGE_SIGNATURES):
+def _looks_like_audio(audio: bytes) -> bool:
+    if audio.startswith(_AUDIO_SIGNATURES):
         return True
-    if len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WEBP":
+    if len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
         return True
-    return False
+    if len(audio) >= 8 and audio[4:8] == b"ftyp":
+        return True
+    # MPEG audio / AAC ADTS frame sync: eleven set bits in the first two bytes.
+    return len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xE0) == 0xE0
 
 
 def _validate_audio(audio: bytes, settings: Settings) -> bytes:
@@ -135,7 +136,7 @@ def _validate_audio(audio: bytes, settings: Settings) -> bytes:
     if len(audio) > settings.voiceprint_sample_max_bytes:
         raise PayloadTooLargeError("voiceprint_sample_too_large")
     value = bytes(audio)
-    if _looks_like_image(value):
+    if not _looks_like_audio(value):
         raise UnsupportedMediaTypeError("unsupported_voiceprint_media")
     return value
 

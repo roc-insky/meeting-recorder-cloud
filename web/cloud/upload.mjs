@@ -103,9 +103,13 @@ export class UploadPump {
       } catch (error) {
         consecutiveFailures += 1;
         lastError = error;
+        const retryAfter = Number(error?.retry_after ?? error?.body?.retry_after);
         this.metrics.lastError = {
           message: error?.message ?? String(error),
           name: error?.name ?? "UploadError",
+          code: typeof error?.code === "string" ? error.code : null,
+          status: Number.isInteger(error?.status) ? error.status : null,
+          retryAfter: Number.isFinite(retryAfter) ? retryAfter : null,
         };
         if (consecutiveFailures >= this.maxAttempts) {
           const remaining = await this.buffer.pending(userId, uploadId);
