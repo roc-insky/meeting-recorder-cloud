@@ -128,3 +128,104 @@ class WriteTests(LocalStoreCase):
         with self.assertRaises(ObjectStoreError):
             self.store.put_file_verified("derived/u1/m1/0/mix/x.wav", source, "0" * 64)
         self.assertFalse((self.root / "derived/u1/m1/0/mix/x.wav").exists())
+
+
+class ReadTests(LocalStoreCase):
+    KEY = "chunks/u1/up1/e1/mic/0000000000.bin"
+    BODY = bytes(range(256)) * 900  # 230_400 bytes, > 3 stream blocks
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store.put_verified(self.KEY, self.BODY, sha(self.BODY))
+
+    def test_object_size_and_exists(self) -> None:
+        self.assertEqual(self.store.object_size(self.KEY), len(self.BODY))
+        self.assertIsNone(self.store.object_size("chunks/missing.bin"))
+        self.assertTrue(self.store.exists(self.KEY))
+        self.assertFalse(self.store.exists("chunks/missing.bin"))
+        self.assertFalse(self.store.exists("chunks"))  # directory is not an object
+
+    def test_iter_range_returns_exact_window_in_bounded_blocks(self) -> None:
+        blocks = list(self.store.iter_range(self.KEY, 100, 200_000))
+        self.assertTrue(all(len(block) <= 65536 for block in blocks))
+        self.assertEqual(b"".join(blocks), self.BODY[100:200_100])
+        self.assertEqual(list(self.store.iter_range(self.KEY, 0, 0)), [])
+
+    def test_iter_range_short_read_raises(self) -> None:
+        with self.assertRaises(ObjectStoreError):
+            list(self.store.iter_range(self.KEY, 0, len(self.BODY) + 1))
+
+    def test_iter_range_rejects_negative(self) -> None:
+        with self.assertRaises(InvalidRequestError):
+            self.store.iter_range(self.KEY, -1, 10)
+
+    def test_reads_missing_key_raise(self) -> None:
+        with self.assertRaises(ObjectStoreError):
+            self.store.get_bytes("chunks/missing.bin")
+        with self.assertRaises(ObjectStoreError):
+            list(self.store.iter_range("chunks/missing.bin", 0, 1))
+
+    def test_get_bytes_returns_whole_object(self) -> None:
+        self.assertEqual(self.store.get_bytes(self.KEY), self.BODY)
+
+    def test_download_replaces_destination(self) -> None:
+        destination = Path(tempfile.mkdtemp(prefix="objects-out-")) / "out.bin"
+        self.addCleanup(shutil.rmtree, destination.parent, True)
+        destination.write_bytes(b"stale")
+        self.store.download_to(self.KEY, destination)
+        self.assertEqual(destination.read_bytes(), self.BODY)
+        self.assertFalse(destination.with_name("out.bin.part").exists())
+
+    def test_download_missing_leaves_no_part(self) -> None:
+        destination = Path(tempfile.mkdtemp(prefix="objects-out-")) / "out.bin"
+        self.addCleanup(shutil.rmtree, destination.parent, True)
+        with self.assertRaises(ObjectStoreError):
+            self.store.download_to("chunks/missing.bin", destination)
+        self.assertFalse(destination.exists())
+        self.assertFalse(destination.with_name("out.bin.part").exists())
+
+
+class MaintenanceTests(LocalStoreCase):
+    def test_delete_is_idempotent_and_prunes_empty_dirs(self) -> None:
+        key = "derived/u1/m1/0/mix/abc.wav"
+        self.store.put_verified(key, b"x", sha(b"x"))
+        self.store.delete(key)
+        self.assertFalse((self.root / key).exists())
+        self.assertFalse((self.root / "derived/u1/m1/0/mix").exists())
+        self.assertTrue(self.root.is_dir())
+        self.store.delete(key)  # second delete is a no-op
+
+    def test_delete_keeps_non_empty_parent(self) -> None:
+        self.store.put_verified("derived/u1/m1/0/mix/a.wav", b"a", sha(b"a"))
+        self.store.put_verified("derived/u1/m1/0/mix/b.wav", b"b", sha(b"b"))
+        self.store.delete("derived/u1/m1/0/mix/a.wav")
+        self.assertTrue((self.root / "derived/u1/m1/0/mix/b.wav").exists())
+
+    def test_list_is_sorted_with_utc_mtime(self) -> None:
+        self.store.put_verified("chunks/a/1.bin", b"a", sha(b"a"))
+        self.store.put_verified("chunks/b/2.bin", b"b", sha(b"b"))
+        listed = self.store.list_objects("chunks/")
+        self.assertEqual([key for key, _ in listed], ["chunks/a/1.bin", "chunks/b/2.bin"])
+        for _, modified in listed:
+            self.assertIsNotNone(modified.tzinfo)
+            self.assertEqual(modified.utcoffset().total_seconds(), 0)
+
+    def test_list_missing_prefix_is_empty(self) -> None:
+        self.assertEqual(self.store.list_objects("chunks/"), [])
+
+    def test_list_skips_temp_dir_and_symlinks(self) -> None:
+        outside = Path(tempfile.mkdtemp(prefix="objects-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "secret.bin").write_bytes(b"secret")
+        self.store.put_verified("chunks/real.bin", b"real", sha(b"real"))
+        (self.store.temp_dir / ".put-leftover").write_bytes(b"x")
+        (self.root / "chunks/link.bin").symlink_to(outside / "secret.bin")
+        self.assertEqual(self.store.list_keys("chunks/"), ["chunks/real.bin"])
+
+    def test_clear_prefix_deletes_only_that_subtree(self) -> None:
+        self.store.put_verified("chunks/a.bin", b"a", sha(b"a"))
+        self.store.put_verified("chunks/b.bin", b"b", sha(b"b"))
+        self.store.put_verified("derived/c.bin", b"c", sha(b"c"))
+        self.assertEqual(self.store.clear_prefix("chunks/"), 2)
+        self.assertEqual(self.store.list_keys("chunks/"), [])
+        self.assertEqual(self.store.list_keys("derived/"), ["derived/c.bin"])

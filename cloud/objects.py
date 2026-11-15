@@ -19,6 +19,7 @@ import io
 import os
 import re
 import shutil
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -316,6 +317,161 @@ class LocalObjectStore:
             stage.unlink(missing_ok=True)
             raise self._map_write_error(exc) from exc
         return size
+
+
+    # -- read path -------------------------------------------------------
+
+    def _stat_object(self, key: str) -> os.stat_result | None:
+        """Stat one object; None when the key is absent, error when not a file."""
+        target = self._resolve(key)
+        try:
+            info = target.stat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ObjectStoreError("not_a_file")
+        return info
+
+    def object_size(self, key: str) -> int | None:
+        info = self._stat_object(key)
+        return None if info is None else info.st_size
+
+    def exists(self, key: str) -> bool:
+        target = self._resolve(key)
+        try:
+            return stat.S_ISREG(target.stat().st_mode)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+
+    def iter_range(self, key: str, start: int, length: int) -> Iterator[bytes]:
+        """Stream length bytes from start; a short object raises."""
+        if start < 0 or length < 0:
+            raise InvalidRequestError("invalid_range")
+        target = self._resolve(key)
+        if length == 0:
+            return iter(())
+        try:
+            info = target.stat()
+        except FileNotFoundError as exc:
+            raise ObjectStoreError("object_not_found") from exc
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ObjectStoreError("not_a_file")
+
+        def blocks() -> Iterator[bytes]:
+            remaining = length
+            try:
+                with open(target, "rb") as handle:
+                    handle.seek(start)
+                    while remaining > 0:
+                        block = handle.read(min(STREAM_BLOCK_BYTES, remaining))
+                        if not block:
+                            raise ObjectStoreError("short_read")
+                        remaining -= len(block)
+                        yield block
+            except OSError as exc:
+                raise ObjectStoreError() from exc
+
+        return blocks()
+
+    def get_bytes(self, key: str) -> bytes:
+        target = self._resolve(key)
+        try:
+            with open(target, "rb") as handle:
+                return handle.read()
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+
+    def download_to(self, key: str, destination: Path) -> None:
+        target = self._resolve(key)
+        try:
+            info = target.stat()
+        except FileNotFoundError as exc:
+            raise ObjectStoreError("object_not_found") from exc
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ObjectStoreError("not_a_file")
+        part = destination.with_name(destination.name + ".part")
+        try:
+            with open(target, "rb") as source, open(part, "wb") as sink:
+                shutil.copyfileobj(source, sink, STREAM_BLOCK_BYTES)
+                sink.flush()
+                os.fsync(sink.fileno())
+            os.replace(part, destination)
+        except OSError as exc:
+            part.unlink(missing_ok=True)
+            raise ObjectStoreError("download_failed") from exc
+
+    # -- maintenance -----------------------------------------------------
+
+    def _resolve_prefix(self, prefix: str) -> Path:
+        stripped = prefix.rstrip("/")
+        if not stripped:
+            return self.root
+        return self._resolve(stripped)
+
+    def list_objects(self, prefix: str = CHUNK_PREFIX) -> list[tuple[str, datetime]]:
+        base = self._resolve_prefix(prefix)
+        try:
+            info = base.stat()
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+        if not stat.S_ISDIR(info.st_mode):
+            return []
+        found: list[tuple[str, datetime]] = []
+        for directory, dirnames, filenames in os.walk(base, followlinks=False):
+            # The staging area lives under the root but is never an object tree.
+            dirnames[:] = [name for name in dirnames if name != _TEMP_DIRNAME]
+            for name in filenames:
+                path = Path(directory) / name
+                try:
+                    entry = os.lstat(path)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(entry.st_mode):
+                    continue  # symlinks and specials are not stored objects
+                key = path.relative_to(self.root).as_posix()
+                modified = datetime.fromtimestamp(entry.st_mtime, timezone.utc)
+                found.append((key, modified))
+        found.sort(key=lambda item: item[0])
+        return found
+
+    def list_keys(self, prefix: str = CHUNK_PREFIX) -> list[str]:
+        return [key for key, _ in self.list_objects(prefix)]
+
+    def clear_prefix(self, prefix: str = CHUNK_PREFIX) -> int:
+        keys = self.list_keys(prefix)
+        for key in keys:
+            self.delete(key)
+        return len(keys)
+
+    def delete(self, key: str) -> None:
+        target = self._resolve(key)
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except IsADirectoryError as exc:
+            raise ObjectStoreError("not_a_file") from exc
+        except OSError as exc:
+            raise ObjectStoreError() from exc
+        # Prune the now-empty parents, stopping at the root or the first
+        # directory that still holds another object.
+        parent = target.parent
+        while parent != self.root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
 
 class S3ObjectStore:
