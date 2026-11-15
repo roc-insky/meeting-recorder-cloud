@@ -306,6 +306,14 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(store.min_free_bytes, 4096)
         self.assertTrue(store.temp_dir.is_dir())
 
+    def test_zero_reserve_is_honoured(self) -> None:
+        store = object_store_from_env(
+            {"CLOUD_OBJECTS_DIR": self._tmp.name, "CLOUD_OBJECTS_MIN_FREE_BYTES": "0"}
+        )
+        self.assertIsNotNone(store)
+        assert store is not None
+        self.assertEqual(store.min_free_bytes, 0)
+
     def test_rejects_bad_reserve(self) -> None:
         for value in ("abc", "-1"):
             with self.subTest(value=value), self.assertRaises(ValueError):

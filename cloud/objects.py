@@ -728,4 +728,7 @@ def object_store_from_env(env: Mapping[str, str]) -> LocalObjectStore | None:
     path = Path(raw)
     if not path.is_absolute():
         raise ObjectStoreError("invalid_objects_dir")
-    return LocalObjectStore(path, min_free_bytes=reserve or _DEFAULT_MIN_FREE_BYTES)
+    return LocalObjectStore(
+        path,
+        min_free_bytes=_DEFAULT_MIN_FREE_BYTES if reserve is None else reserve,
+    )
