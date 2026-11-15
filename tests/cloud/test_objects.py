@@ -162,8 +162,10 @@ class ReadTests(LocalStoreCase):
     def test_reads_missing_key_raise(self) -> None:
         with self.assertRaises(ObjectStoreError):
             self.store.get_bytes("chunks/missing.bin")
+        # Eager: the call itself raises, before any block is consumed, so
+        # playback maps a missing object before it starts streaming.
         with self.assertRaises(ObjectStoreError):
-            list(self.store.iter_range("chunks/missing.bin", 0, 1))
+            self.store.iter_range("chunks/missing.bin", 0, 1)
 
     def test_get_bytes_returns_whole_object(self) -> None:
         self.assertEqual(self.store.get_bytes(self.KEY), self.BODY)
@@ -182,6 +184,16 @@ class ReadTests(LocalStoreCase):
         with self.assertRaises(ObjectStoreError):
             self.store.download_to("chunks/missing.bin", destination)
         self.assertFalse(destination.exists())
+        self.assertFalse(destination.with_name("out.bin.part").exists())
+
+    def test_download_failure_removes_part_and_keeps_destination(self) -> None:
+        destination = Path(tempfile.mkdtemp(prefix="objects-out-")) / "out.bin"
+        self.addCleanup(shutil.rmtree, destination.parent, True)
+        destination.write_bytes(b"stale")
+        with mock.patch("cloud.objects.shutil.copyfileobj", side_effect=OSError(errno.EIO, "boom")):
+            with self.assertRaises(ObjectStoreError):
+                self.store.download_to(self.KEY, destination)
+        self.assertEqual(destination.read_bytes(), b"stale")
         self.assertFalse(destination.with_name("out.bin.part").exists())
 
 
@@ -220,7 +232,12 @@ class MaintenanceTests(LocalStoreCase):
         self.store.put_verified("chunks/real.bin", b"real", sha(b"real"))
         (self.store.temp_dir / ".put-leftover").write_bytes(b"x")
         (self.root / "chunks/link.bin").symlink_to(outside / "secret.bin")
+        (self.root / "chunks/.tmp").mkdir()
+        (self.root / "chunks/.tmp/ghost.bin").write_bytes(b"ghost")
         self.assertEqual(self.store.list_keys("chunks/"), ["chunks/real.bin"])
+        # The same escaping symlink is rejected on the read path too.
+        with self.assertRaises(ObjectStoreError):
+            self.store.get_bytes("chunks/link.bin")
 
     def test_clear_prefix_deletes_only_that_subtree(self) -> None:
         self.store.put_verified("chunks/a.bin", b"a", sha(b"a"))
