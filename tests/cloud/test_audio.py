@@ -37,6 +37,7 @@ from cloud.contracts import (
     NotFoundError,
     PayloadTooLargeError,
 )
+from cloud.objects import LocalObjectStore, StorageFullError
 from tests.cloud.support import CloudCase
 
 CODEC = "audio/webm;codecs=opus"
@@ -716,6 +717,25 @@ class AudioCase(CloudCase):
         self.assertEqual(list(workspace.iterdir()), [])
         self.assertEqual(self.query_count("derived_assets"), 0)
         self.assertGreater(MAX_INPUT_BYTES, 10)
+
+    def test_preflight_rejects_below_estimate(self) -> None:
+        import cloud.audio as audio_mod
+
+        plan = audio_mod._Plan(
+            spans=[(0, 1000)],
+            gaps=[],
+            duration_ms=1000,
+            track_ids=["mic"],
+            input_bytes=1024,
+        )
+        store = LocalObjectStore(
+            Path(tempfile.mkdtemp(prefix="audio-space-")), min_free_bytes=1 << 62
+        )
+        self.addCleanup(shutil.rmtree, store.root, True)
+        with self.assertRaises(StorageFullError) as raised:
+            audio_mod._require_build_space(store, plan)
+        self.assertEqual(raised.exception.code, "audio_build_needs_space")
+        self.assertGreater(audio_mod._estimate_build_bytes(plan), plan.input_bytes)
 
     def test_unknown_or_open_input_is_not_preparable(self) -> None:
         meeting_id, version = self.record_one_epoch(self.a)

@@ -51,7 +51,7 @@ from cloud.contracts import (
     NotFoundError,
     PayloadTooLargeError,
 )
-from cloud.objects import ObjectStoreError, derived_object_key
+from cloud.objects import ObjectStoreError, StorageFullError, derived_object_key
 from cloud.schema import (
     Chunk,
     DerivedAsset,
@@ -105,6 +105,27 @@ class _Plan:
     duration_ms: int
     track_ids: list[str]
     input_bytes: int
+
+
+def _estimate_build_bytes(plan: _Plan) -> int:
+    """Upper bound for decode scratch + published WAVs (16 kHz mono 16-bit)."""
+    pcm = (plan.duration_ms / 1000.0) * WORK_RATE * SAMPLE_WIDTH
+    tracks = len(plan.track_ids)
+    # decode scratch (all tracks as float32 + the mixed output) plus published WAVs
+    return int(plan.input_bytes + pcm * (2 * tracks + 1) + pcm * (tracks + 1))
+
+
+def _require_build_space(objects: object, plan: _Plan) -> None:
+    available = getattr(objects, "available_bytes", None)
+    if not callable(available):
+        return
+    reserve = int(getattr(objects, "min_free_bytes", 0) or 0)
+    if available() < _estimate_build_bytes(plan) + reserve:
+        # StorageFullError keeps its 507 status but pins the wire code to
+        # "storage_full"; the audio preflight reports why it refused.
+        error = StorageFullError("audio_build_needs_space")
+        error.code = "audio_build_needs_space"
+        raise error
 
 
 def _safe_path(path: Path | str, workspace: Path) -> Path:
@@ -577,6 +598,7 @@ def prepare_audio(
     plan = _plan(db, ctx, upload)
     if plan.input_bytes > MAX_INPUT_BYTES:
         raise PayloadTooLargeError("audio_input_too_large")
+    _require_build_space(objects, plan)
 
     existing = _existing_assets(db, ctx, meeting_id, input_version)
     if existing:
