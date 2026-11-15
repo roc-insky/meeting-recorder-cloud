@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import stat
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ _KEY_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 _KEY_MAX_CHARS = 1024
 _TEMP_DIRNAME = ".tmp"
 _DEFAULT_MIN_FREE_BYTES = 1024 ** 3
+_OBJECTS_DIR_ENV = "CLOUD_OBJECTS_DIR"
+_MIN_FREE_ENV = "CLOUD_OBJECTS_MIN_FREE_BYTES"
 
 
 class ObjectStoreError(CloudError):
@@ -179,11 +182,16 @@ class LocalObjectStore:
         self.root = Path(root).resolve()
         #: Bytes that must stay free after every write; public for health checks.
         self.min_free_bytes = min_free_bytes
-        self.temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # mkdir's mode is masked by the umask; the deploy expects 0750 on the
-        # root and a private staging directory even if .tmp already existed.
-        os.chmod(self.root, 0o750)
-        os.chmod(self.temp_dir, 0o700)
+        try:
+            self.temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # mkdir's mode is masked by the umask; the deploy expects 0750 on
+            # the root and a private staging directory even if .tmp existed.
+            os.chmod(self.root, 0o750)
+            os.chmod(self.temp_dir, 0o700)
+        except OSError as exc:
+            # Every construction path reports the same code: a root that cannot
+            # be created or secured is unusable, never a raw NotADirectoryError.
+            raise ObjectStoreError("unusable_objects_dir") from exc
 
     @property
     def temp_dir(self) -> Path:
@@ -473,6 +481,48 @@ class LocalObjectStore:
                 break
             parent = parent.parent
 
+    # -- health ----------------------------------------------------------
+
+    def ready(self) -> bool:
+        """True only for a writable root that keeps the reserve free.
+
+        Never raises: the health route must report "not ready" rather than a
+        5xx when the volume disappeared or cannot be statvfs'd.
+        """
+        try:
+            if not self.root.is_dir():
+                return False
+            if not os.access(self.root, os.W_OK | os.X_OK):
+                return False
+            return self.available_bytes() >= self.min_free_bytes
+        except (ObjectStoreError, OSError):
+            return False
+
+    def sweep_stale_temp(self, max_age_s: int = 3600) -> int:
+        """Drop abandoned staging files older than max_age_s seconds.
+
+        Only regular files directly inside .tmp are candidates: it never
+        recurses, skips symlinks and directories, and a per-file failure is
+        swallowed so one bad entry cannot abort the sweep.
+        """
+        cutoff = time.time() - max_age_s
+        try:
+            entries = list(self.temp_dir.iterdir())
+        except OSError:
+            return 0  # a missing staging directory has nothing to sweep
+        removed = 0
+        for entry in entries:
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+                entry.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
 
 class S3ObjectStore:
     """Thin minio-py client; every call maps transport errors to a 5xx."""
@@ -663,9 +713,19 @@ class S3ObjectStore:
         return removed
 
 
-def object_store_from_env(env: Mapping[str, str] | None = None) -> S3ObjectStore | None:
-    """Build the production store from CLOUD_S3_* when it is configured."""
-    source = os.environ if env is None else env
-    if not source.get("CLOUD_S3_BUCKET"):
+def object_store_from_env(env: Mapping[str, str]) -> LocalObjectStore | None:
+    """Build the local store from CLOUD_OBJECTS_*; None when unconfigured."""
+    raw = (env.get(_OBJECTS_DIR_ENV) or "").strip()
+    if not raw:
         return None
-    return S3ObjectStore(S3Config.from_env(source))
+    reserve: int | None = None
+    raw_reserve = (env.get(_MIN_FREE_ENV) or "").strip()
+    if raw_reserve:
+        # A bad value must fail start-up instead of silently falling back.
+        reserve = int(raw_reserve)
+        if reserve < 0:
+            raise ValueError(_MIN_FREE_ENV + " must be non-negative")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ObjectStoreError("invalid_objects_dir")
+    return LocalObjectStore(path, min_free_bytes=reserve or _DEFAULT_MIN_FREE_BYTES)

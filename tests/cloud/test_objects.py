@@ -246,3 +246,70 @@ class MaintenanceTests(LocalStoreCase):
         self.assertEqual(self.store.clear_prefix("chunks/"), 2)
         self.assertEqual(self.store.list_keys("chunks/"), [])
         self.assertEqual(self.store.list_keys("derived/"), ["derived/c.bin"])
+
+
+class ReadinessTests(LocalStoreCase):
+    def test_ready_true_for_writable_root(self) -> None:
+        self.assertTrue(self.store.ready())
+
+    def test_ready_false_without_root(self) -> None:
+        shutil.rmtree(self.root)
+        self.assertFalse(self.store.ready())
+
+    def test_ready_false_below_reserve(self) -> None:
+        store = LocalObjectStore(self.root, min_free_bytes=1 << 62)
+        self.assertFalse(store.ready())
+
+    def test_init_rejects_unusable_root(self) -> None:
+        with self.assertRaises(ObjectStoreError):
+            LocalObjectStore(Path("/dev/null/nope"), min_free_bytes=0)
+        with self.assertRaises(ValueError):
+            LocalObjectStore(self.root, min_free_bytes=-1)
+
+    def test_sweep_removes_only_stale_regular_files(self) -> None:
+        fresh = self.store.temp_dir / ".put-fresh"
+        stale = self.store.temp_dir / ".put-stale"
+        nested = self.store.temp_dir / "nested"
+        fresh.write_bytes(b"f")
+        stale.write_bytes(b"s")
+        nested.mkdir()
+        (nested / ".put-inside").write_bytes(b"n")
+        old = 1_000_000.0
+        os.utime(stale, (old, old))
+        os.utime(nested, (old, old))
+        self.assertEqual(self.store.sweep_stale_temp(max_age_s=60), 1)
+        self.assertTrue(fresh.exists())
+        self.assertFalse(stale.exists())
+        self.assertTrue(nested.exists())
+
+
+class FactoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="objects-factory-")
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_returns_none_without_directory(self) -> None:
+        self.assertIsNone(object_store_from_env({}))
+
+    def test_rejects_relative_directory(self) -> None:
+        with self.assertRaises(ObjectStoreError):
+            object_store_from_env({"CLOUD_OBJECTS_DIR": "relative/dir"})
+
+    def test_reads_reserve_and_creates_temp_dir(self) -> None:
+        env = {
+            "CLOUD_OBJECTS_DIR": self._tmp.name,
+            "CLOUD_OBJECTS_MIN_FREE_BYTES": "4096",
+        }
+        store = object_store_from_env(env)
+        self.assertIsNotNone(store)
+        assert store is not None
+        self.assertEqual(store.min_free_bytes, 4096)
+        self.assertTrue(store.temp_dir.is_dir())
+
+    def test_rejects_bad_reserve(self) -> None:
+        for value in ("abc", "-1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                object_store_from_env(
+                    {"CLOUD_OBJECTS_DIR": self._tmp.name, "CLOUD_OBJECTS_MIN_FREE_BYTES": value}
+                )
+
