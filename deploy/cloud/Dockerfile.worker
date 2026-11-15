@@ -40,12 +40,15 @@ RUN pip install --requirement requirements-cloud.lock
 COPY cloud ./cloud
 
 # Read-only model mount point, owned by root, plus a non-root user with no
-# login shell.
+# login shell. The worker shares uid 10001 with the API because both write the
+# same local object tree (the objectsdata volume); its own .tmp staging dir is
+# 0700, so a distinct uid could not sweep or publish there.
 RUN install -d -m 0555 /models \
-    && useradd --system --uid 10002 --no-create-home \
-        --shell /usr/sbin/nologin cloud-worker
+    && useradd --system --uid 10001 --no-create-home \
+        --shell /usr/sbin/nologin cloud-worker \
+    && install -d -o 10001 -g 10001 -m 0750 /var/lib/meeting-recorder
 
-USER 10002
+USER 10001
 
 # --check is expected to fail until a real, measured manifest and its local
 # weights are mounted. An unhealthy worker is the honest state.

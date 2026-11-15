@@ -40,9 +40,14 @@ COPY cloud ./cloud
 
 # Non-root, no login shell. /var/lib/cloud holds the append-only privacy
 # tombstone audit; a named volume mounted there inherits this ownership.
+# /var/lib/meeting-recorder is the local object store shared with the worker:
+# it is created here so the named volume inherits uid 10001, and the worker
+# image runs as the same uid because both processes write one object tree
+# (staging files are 0700 and published objects 0640, owner-only).
 RUN useradd --system --uid 10001 --no-create-home \
         --shell /usr/sbin/nologin cloud \
-    && install -d -o 10001 -g 10001 -m 0700 /var/lib/cloud
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/cloud \
+    && install -d -o 10001 -g 10001 -m 0750 /var/lib/meeting-recorder
 
 USER 10001
 

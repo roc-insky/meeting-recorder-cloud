@@ -23,7 +23,7 @@ import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Iterator, Mapping
 from uuid import uuid4
 
 from cloud.contracts import CloudError, InvalidRequestError
