@@ -705,6 +705,7 @@ def run_cleanup(now: datetime) -> dict[str, int]:
         "meetings_purged": 0,
         "users_purged": 0,
         "ephemeral_removed": 0,
+        "scratch_removed": 0,
         "errors": 0,
     }
     records = runtime.audit_store.read_all()
@@ -720,6 +721,17 @@ def run_cleanup(now: datetime) -> dict[str, int]:
             prefixes.extend(record["object_prefixes"])
 
     objects = runtime.object_store
+    # Abandoned .put-* staging files are not live objects; sweep them before the
+    # orphan pass so a crashed write can never look like a chunk to keep.
+    sweeper = getattr(objects, "sweep_stale_temp", None)
+    if callable(sweeper):
+        try:
+            counts["scratch_removed"] = sweeper(
+                max_age_s=max(3600, settings.ephemeral_cleanup_s)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            counts["errors"] += 1
+            log.warning("scratch_sweep: %s", exc)
     if objects is not None:
         for prefix in prefixes:
             try:

@@ -897,6 +897,14 @@ class PrivacyCase(CloudCase):
         self.assertTrue(outside.exists())
         self.assertTrue(root.exists())
 
+    def test_cleanup_removes_stale_staging_files(self) -> None:
+        stale = self.object_store.temp_dir / ".put-abandoned"
+        stale.write_bytes(b"partial")
+        os.utime(stale, (1_000_000.0, 1_000_000.0))
+        counts = run_cleanup(BASE_TIME)
+        self.assertEqual(counts["scratch_removed"], 1)
+        self.assertFalse(stale.exists())
+
     def test_privacy_maintenance_blocks_only_cloud_api(self) -> None:
         settings = self.settings.model_copy(update={"privacy_maintenance": True})
         client = self.app_client(settings=settings)
