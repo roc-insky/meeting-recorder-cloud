@@ -1,4 +1,4 @@
-# Runtime dependencies for the cloud meeting recorder (Python 3.12).
+# Runtime dependencies for the cloud meeting recorder (Python 3.13).
 # Install: uv pip install --python .venv-cloud/bin/python -r requirements-cloud.txt
 # The exact resolved set used by Task 4 is pinned in requirements-cloud.lock.
 fastapi>=0.115,<1
