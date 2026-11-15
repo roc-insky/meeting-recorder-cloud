@@ -1,8 +1,9 @@
 """Health, readiness and offline warmup behavior (Task 17).
 
-These tests use the real disposable PostgreSQL database and the real private
-MinIO bucket through CloudCase. They never start a deployment: the Docker
-image, compose file and nginx configuration are static, unexecuted scaffolds.
+These tests use the real disposable PostgreSQL database and the per-class
+local object-store root through CloudCase. They never start a deployment: the
+Docker image, compose file and nginx configuration are static, unexecuted
+scaffolds.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from typing import Any
 from unittest import mock
 
 from cloud.health import ModelWarmupError, model_ready, readiness, warm_models
+from cloud.objects import LocalObjectStore
 from tests.cloud.support import TEST_SECRET, CloudCase
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -92,25 +94,9 @@ class HealthCase(CloudCase):
             "CLOUD_DATABASE_URL": self.database_url,
             "CLOUD_SECRET_KEY": TEST_SECRET,
             "CLOUD_ENVIRONMENT": "test",
+            "CLOUD_OBJECTS_DIR": str(self.object_store.root),
+            "CLOUD_OBJECTS_MIN_FREE_BYTES": "0",
         }
-        for name in (
-            "CLOUD_S3_ENDPOINT",
-            "CLOUD_S3_ACCESS_KEY",
-            "CLOUD_S3_SECRET_KEY",
-            "CLOUD_S3_BUCKET",
-            "CLOUD_S3_SECURE",
-        ):
-            if name in os.environ:
-                env[name] = os.environ[name]
-        env.update(
-            {
-                "CLOUD_S3_ENDPOINT": self.s3_config.endpoint,
-                "CLOUD_S3_ACCESS_KEY": self.s3_config.access_key,
-                "CLOUD_S3_SECRET_KEY": self.s3_config.secret_key,
-                "CLOUD_S3_BUCKET": self.s3_config.bucket,
-                "CLOUD_S3_SECURE": "true" if self.s3_config.secure else "false",
-            }
-        )
         return env
 
     def run_python(
@@ -222,9 +208,9 @@ class HealthCase(CloudCase):
             TEST_SECRET,
             manifest_path,
             cache_path,
-            self.s3_config.bucket,
-            self.s3_config.access_key,
-            self.s3_config.secret_key,
+            # The random temp-root segment, never the full path: on macOS
+            # /var resolves to /private/var and the sentinel below would trip.
+            self.object_store.root.name,
             "postgresql+psycopg",
             "/Users/",
             "/private/",
@@ -319,7 +305,7 @@ class HealthCase(CloudCase):
             payload,
             {"database": True, "storage": True, "model": False, "queue": True},
         )
-        self.assertNotIn(self.s3_config.bucket, checked.stdout + checked.stderr)
+        self.assertNotIn(self.object_store.root.name, checked.stdout + checked.stderr)
 
         # A warmed local manifest lets --check succeed; still no processing.
         directory = self.temp_dir()
@@ -360,6 +346,15 @@ class HealthCase(CloudCase):
         values = readiness(self.settings, self.session_factory, self.object_store)
         self.assertEqual(set(values), READINESS_KEYS)
         self.assertTrue(all(isinstance(value, bool) for value in values.values()))
+
+    def test_storage_unready_when_root_disappears(self) -> None:
+        shutil.rmtree(self.object_store.root)
+        self.addCleanup(
+            lambda: LocalObjectStore(self.object_store.root, min_free_bytes=0)
+        )
+        response = self.a.get("/api/cloud/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["storage"])
 
 
 if __name__ == "__main__":

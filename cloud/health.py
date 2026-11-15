@@ -1,9 +1,9 @@
 """Local readiness probes and offline model warmup (Task 17).
 
 The four readiness booleans are the only health surface this deployment
-exposes. Nothing here ever returns a filesystem path, bucket name, engine
-name, key, environment value, exception message or row count: probes catch
-every failure and collapse it to ``False``.
+exposes. Nothing here ever returns a filesystem path, the object-store root,
+engine name, key, environment value, exception message or row count: probes
+catch every failure and collapse it to ``False``.
 
 Two rules keep the deployment honest:
 
@@ -270,20 +270,19 @@ def _probe(session_factory: Callable[[], Session] | None, statement: Any) -> boo
                 pass
 
 
-def _storage_ready(object_store: Any) -> bool:
-    """Check the configured private bucket without exposing its name."""
-    if object_store is None:
+def _storage_ready(object_store: object) -> bool:
+    """True when the object store root is present, writable and above reserve.
+
+    The probe is the store's own ``ready()``: it re-stats the root and its free
+    space instead of trusting the value captured at construction, so a removed
+    volume or a vanished directory fails closed. A store without that method
+    is not a usable object store and reports False.
+    """
+    probe = getattr(object_store, "ready", None)
+    if not callable(probe):
         return False
     try:
-        checker = getattr(object_store, "bucket_exists", None)
-        if callable(checker):
-            return bool(checker())
-        client = getattr(object_store, "client", None)
-        config = getattr(object_store, "config", None)
-        bucket = getattr(config, "bucket", None)
-        if client is None or not isinstance(bucket, str) or not bucket:
-            return False
-        return bool(client.bucket_exists(bucket))
+        return bool(probe())
     except Exception:
         return False
 
@@ -303,9 +302,10 @@ def readiness(
     """Return the four readiness booleans; never raises and never leaks detail.
 
     ``database`` and ``queue`` each use a fresh short-lived session with a
-    short statement timeout. ``storage`` checks that the configured bucket is
-    reachable. ``model`` is true only when the local manifest and its files
-    verify; it is expected to be false until G0/G2 approve real weights.
+    short statement timeout. ``storage`` checks that the object store root is
+    present, writable and above its free-space reserve. ``model`` is true only
+    when the local manifest and its files verify; it is expected to be false
+    until G0/G2 approve real weights.
     """
     return {
         "database": _probe(session_factory, text("SELECT 1")),

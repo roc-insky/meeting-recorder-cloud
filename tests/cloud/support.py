@@ -5,10 +5,9 @@ test starts from empty tables, so the suite is repeatable. Identity comes from
 the explicitly test-only fake provider because gate G1 (real auth provider) is
 still unanswered; no OAuth secret and no production data are involved.
 
-Object storage is the real MinIO/S3 endpoint configured by ``CLOUD_S3_*``
-(Task 5): the bucket is private and the client is minio-py because boto3 PUT
-hangs against this MinIO build (see progress.md, "Test object store for
-Tasks 5+"). Tests that write objects clear the ``chunks/`` prefix themselves so
+Requires ``TEST_DATABASE_URL`` pointing at a disposable PostgreSQL database.
+Object storage is a per-class temporary directory; no external service is
+needed. Tests that write objects clear the ``chunks/`` prefix themselves so
 authentication tests never touch the store.
 
 Deterministic time comes from ``FakeClock``; business code must never call
@@ -19,8 +18,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -29,7 +31,7 @@ from sqlalchemy.engine import Engine
 
 from cloud.app import create_app
 from cloud.db import Base, reset_schema
-from cloud.objects import S3Config, S3ObjectStore
+from cloud.objects import LocalObjectStore
 from cloud.settings import Settings
 
 BASE_TIME = datetime(2026, 11, 14, 7, 0, 0, tzinfo=timezone.utc)
@@ -122,13 +124,16 @@ class CloudCase(unittest.TestCase):
             login_state_ttl_s=600,
         )
         cls.clock = FakeClock()
-        cls.s3_config = S3Config.from_env(os.environ)
-        cls.object_store = S3ObjectStore(cls.s3_config)
+        cls.object_store_root = Path(tempfile.mkdtemp(prefix="cloud-objects-"))
+        cls.object_store = LocalObjectStore(cls.object_store_root, min_free_bytes=0)
         cls._build_app()
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.engine.dispose()
+        root = getattr(cls, "object_store_root", None)
+        if root is not None:
+            shutil.rmtree(root, ignore_errors=True)
 
     @classmethod
     def _build_app(cls) -> None:
@@ -149,7 +154,6 @@ class CloudCase(unittest.TestCase):
         self._csrf_tokens: dict[int, str] = {}
         self.app = type(self).app
         self.object_store = type(self).object_store
-        self.s3_config = type(self).s3_config
         self.anon = TestClient(self.app)
         self.a = self.login(A_EMAIL)
         self.b = self.login(B_EMAIL)

@@ -1,8 +1,8 @@
 """Task 5: durable private audio chunks and capture leases.
 
-Every test runs against the real PostgreSQL database and the real private
-MinIO bucket configured through CLOUD_S3_* (no fakes for storage). The suite
-pins the contract that matters for data safety:
+Every test runs against the real PostgreSQL database and the per-class local
+object-store root (no fakes for storage). The suite pins the contract that
+matters for data safety:
 
 * write-before-ACK — a chunk row only exists after the object is stored, so an
   ACK never refers to bytes that cannot be recovered;
@@ -21,9 +21,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import shutil
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 
-import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -34,9 +36,8 @@ from cloud.contracts import PayloadTooLargeError
 from cloud.leases import CAPTURE_LEASE_S
 from cloud.objects import (
     CHUNK_PREFIX,
+    LocalObjectStore,
     ObjectStoreError,
-    S3Config,
-    S3ObjectStore,
     chunk_object_key,
 )
 from cloud.uploads import read_bounded_body, scan_orphans
@@ -101,7 +102,7 @@ class UploadsCase(CloudCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        # Fails loudly here (rather than mid-test) when MinIO is unreachable.
+        # Start from an empty prefix in the shared local object store root.
         cls.object_store.clear_prefix(CHUNK_PREFIX)
 
     def setUp(self) -> None:
@@ -307,17 +308,13 @@ class UploadsCase(CloudCase):
 
     def test_real_object_store_write_failure_rolls_back(self) -> None:
         _, upload_id, token = self.recorded_upload()
-        missing_bucket = S3Config(
-            endpoint=self.s3_config.endpoint,
-            access_key=self.s3_config.access_key,
-            secret_key=self.s3_config.secret_key,
-            bucket="cloud-test-bucket-does-not-exist",
-            secure=self.s3_config.secure,
-        )
-        client = self.app_client(
-            object_store=S3ObjectStore(missing_bucket),
-            raise_server_exceptions=False,
-        )
+        # A real store on its own root, made unusable by removing the root after
+        # construction: the write must fail before any chunk row is committed.
+        root = Path(tempfile.mkdtemp(prefix="uploads-fault-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        store = LocalObjectStore(root, min_free_bytes=0)
+        client = self.app_client(object_store=store, raise_server_exceptions=False)
+        shutil.rmtree(root)
         response = self.put_chunk(
             client, upload_id, "e1", "mic", 0, b"frames",
             start_ms=0, end_ms=1000, token=token,
@@ -724,17 +721,14 @@ class UploadsCase(CloudCase):
         self.assertTrue(key.startswith(f"chunks/{self.a_user_id}/{upload_id}/"))
         self.assertEqual(self.object_store.get_bytes(key), body)
 
-        base = f"{self.s3_config.endpoint_url}/{self.s3_config.bucket}/{key}"
-        anonymous = httpx.get(base, timeout=10, trust_env=False)
-        self.assertEqual(anonymous.status_code, 403)
-        self.assertNotIn(b"private-audio", anonymous.content)
-
-        listing = httpx.get(
-            f"{self.s3_config.endpoint_url}/{self.s3_config.bucket}?list-type=2",
-            timeout=10,
-            trust_env=False,
-        )
-        self.assertEqual(listing.status_code, 403)
+        # Privacy is a filesystem property now: the object is a plain file
+        # under a group-private root and its own mode grants nothing to other
+        # users. No HTTP endpoint serves the root, so there is no anonymous
+        # URL that could answer 200 (the old MinIO probe answered 403).
+        stored = self.object_store.root / key
+        self.assertEqual(stored.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.object_store.root.stat().st_mode & 0o777, 0o750)
+        self.assertEqual(self.object_store.temp_dir.stat().st_mode & 0o777, 0o700)
 
     def test_oversized_body_rejected(self) -> None:
         _, upload_id, token = self.recorded_upload()
