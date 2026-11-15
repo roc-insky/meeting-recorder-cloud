@@ -734,7 +734,8 @@ class AudioCase(CloudCase):
         self.addCleanup(shutil.rmtree, store.root, True)
         with self.assertRaises(StorageFullError) as raised:
             audio_mod._require_build_space(store, plan)
-        self.assertEqual(raised.exception.code, "audio_build_needs_space")
+        self.assertEqual(raised.exception.code, "storage_full")
+        self.assertIn("audio_build_needs_space", str(raised.exception))
         self.assertGreater(audio_mod._estimate_build_bytes(plan), plan.input_bytes)
 
     def test_unknown_or_open_input_is_not_preparable(self) -> None:

@@ -121,11 +121,8 @@ def _require_build_space(objects: object, plan: _Plan) -> None:
         return
     reserve = int(getattr(objects, "min_free_bytes", 0) or 0)
     if available() < _estimate_build_bytes(plan) + reserve:
-        # StorageFullError keeps its 507 status but pins the wire code to
-        # "storage_full"; the audio preflight reports why it refused.
-        error = StorageFullError("audio_build_needs_space")
-        error.code = "audio_build_needs_space"
-        raise error
+        # The wire code stays "storage_full" (507); the message names the stage.
+        raise StorageFullError("audio_build_needs_space")
 
 
 def _safe_path(path: Path | str, workspace: Path) -> Path:
