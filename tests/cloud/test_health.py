@@ -348,13 +348,15 @@ class HealthCase(CloudCase):
         self.assertTrue(all(isinstance(value, bool) for value in values.values()))
 
     def test_storage_unready_when_root_disappears(self) -> None:
-        shutil.rmtree(self.object_store.root)
-        self.addCleanup(
-            lambda: LocalObjectStore(self.object_store.root, min_free_bytes=0)
-        )
-        response = self.a.get("/api/cloud/health")
-        self.assertEqual(response.status_code, 503)
+        root = Path(tempfile.mkdtemp(prefix="health-gone-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        store = LocalObjectStore(root, min_free_bytes=0)
+        client = self.app_client(object_store=store)
+        shutil.rmtree(root)
+        response = client.get("/api/cloud/health")
+        # storage is the discriminating flag: model is false here anyway.
         self.assertFalse(response.json()["storage"])
+        self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":
