@@ -735,7 +735,42 @@ class AudioCase(CloudCase):
         with self.assertRaises(StorageFullError) as raised:
             audio_mod._require_build_space(store, plan)
         self.assertEqual(raised.exception.code, "storage_full")
+        self.assertEqual(raised.exception.status_code, 507)
         self.assertIn("audio_build_needs_space", str(raised.exception))
+
+    def test_preflight_counts_the_store_copy_and_the_reserve(self) -> None:
+        import cloud.audio as audio_mod
+
+        plan = audio_mod._Plan(
+            spans=[(0, 1000)],
+            gaps=[],
+            duration_ms=1000,
+            track_ids=["mic"],
+            input_bytes=1024,
+        )
+        estimate = audio_mod._estimate_build_bytes(plan)
+
+        class FakeStore:
+            min_free_bytes = 10
+
+            def __init__(self, free: int) -> None:
+                self.free = free
+
+            def available_bytes(self) -> int:
+                return self.free
+
+        with self.assertRaises(StorageFullError):
+            audio_mod._require_build_space(FakeStore(estimate + 9), plan)
+        audio_mod._require_build_space(FakeStore(estimate + 10), plan)
+
+        class NoProbe:
+            pass
+
+        class NotCallable:
+            available_bytes = 123
+
+        audio_mod._require_build_space(NoProbe(), plan)
+        audio_mod._require_build_space(NotCallable(), plan)
         self.assertGreater(audio_mod._estimate_build_bytes(plan), plan.input_bytes)
 
     def test_unknown_or_open_input_is_not_preparable(self) -> None:

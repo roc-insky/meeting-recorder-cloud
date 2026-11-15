@@ -108,11 +108,21 @@ class _Plan:
 
 
 def _estimate_build_bytes(plan: _Plan) -> int:
-    """Upper bound for decode scratch + published WAVs (16 kHz mono 16-bit)."""
+    """Upper bound for the peak this build occupies (16 kHz mono 16-bit).
+
+    At publish time the decoded span PCM, the per-track PCM, the mix PCM, every
+    scratch WAV and the store's own copy of each published WAV all coexist, so
+    the WAV set is counted twice: once as scratch, once inside the store.
+    """
     pcm = (plan.duration_ms / 1000.0) * WORK_RATE * SAMPLE_WIDTH
     tracks = len(plan.track_ids)
-    # decode scratch (all tracks as float32 + the mixed output) plus published WAVs
-    return int(plan.input_bytes + pcm * (2 * tracks + 1) + pcm * (tracks + 1))
+    return int(
+        plan.input_bytes
+        + pcm * (2 * tracks + 1)      # decoded spans + track PCM + mix PCM
+        + 2 * pcm * (tracks + 1)      # scratch WAVs + their store copies
+        + 44 * (tracks + 1)           # WAV headers
+        + MAX_STDERR_BYTES
+    )
 
 
 def _require_build_space(objects: object, plan: _Plan) -> None:
