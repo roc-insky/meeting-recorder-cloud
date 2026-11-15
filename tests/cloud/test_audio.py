@@ -736,6 +736,9 @@ class AudioCase(CloudCase):
             audio_mod._require_build_space(store, plan)
         self.assertEqual(raised.exception.code, "storage_full")
         self.assertEqual(raised.exception.status_code, 507)
+        # Pin the arithmetic: 1024 input + 32000*3 PCM + 2*32000*2 WAV copies
+        # + 2*44 headers + the stderr cap.
+        self.assertEqual(audio_mod._estimate_build_bytes(plan), 233304)
         self.assertIn("audio_build_needs_space", str(raised.exception))
 
     def test_preflight_counts_the_store_copy_and_the_reserve(self) -> None:
