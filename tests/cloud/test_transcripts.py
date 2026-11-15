@@ -1,8 +1,9 @@
 """Task 10: published transcript versions, stable speakers and re-transcription.
 
-These tests use real PostgreSQL and real MinIO (already running), synthetic
-16 kHz mono tone fixtures encoded as Opus/WebM chunks, and a deterministic fake
-model adapter. Nothing here measures ASR quality or runs a real recognizer.
+These tests use real PostgreSQL and a real local object-store root (a
+temporary directory), synthetic 16 kHz mono tone fixtures encoded as Opus/WebM
+chunks, and a deterministic fake model adapter. Nothing here measures ASR
+quality or runs a real recognizer.
 """
 
 from __future__ import annotations

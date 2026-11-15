@@ -724,7 +724,7 @@ class UploadsCase(CloudCase):
         # Privacy is a filesystem property now: the object is a plain file
         # under a group-private root and its own mode grants nothing to other
         # users. No HTTP endpoint serves the root, so there is no anonymous
-        # URL that could answer 200 (the old MinIO probe answered 403).
+        # URL that could answer 200 (an anonymous HTTP probe answered 403).
         stored = self.object_store.root / key
         self.assertEqual(stored.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.object_store.root.stat().st_mode & 0o777, 0o750)

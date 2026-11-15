@@ -1,9 +1,10 @@
 """Task 16: owner isolation, bounded bodies and private processing.
 
-The tests exercise the real PostgreSQL/MinIO harness, not an in-memory fake:
-ownership fences, shared fixed-window budgets and the concurrent decode slot are
-only meaningful when two independent sessions really race. Browser checks live
-in tests/e2e/cloud/isolation.spec.mjs; this module never claims a real browser,
+The tests exercise real PostgreSQL and a real local object-store root (a
+temporary directory), not an in-memory fake: ownership fences, shared
+fixed-window budgets and the concurrent decode slot are only meaningful when
+two independent sessions really race. Browser checks live in
+tests/e2e/cloud/isolation.spec.mjs; this module never claims a real browser,
 provider or AWS deployment.
 """
 

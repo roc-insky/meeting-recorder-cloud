@@ -9,7 +9,8 @@
 #
 # Every credential, secret and TLS path is a required environment variable:
 # compose refuses to start when one is missing. There are no default
-# passwords, no published database or object-store ports, and no service
+# passwords and no published database or object-store ports; audio objects
+# live on the objectsdata volume mounted by api and worker, and no service
 # binds the existing local GUI port 3080.
 #
 # Usage (after G0-G4 approval, a real identity provider and a measured
@@ -34,79 +35,6 @@ services:
       retries: 12
     networks: [internal]
 
-  minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    restart: unless-stopped
-    command: ["server", "/data"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
-    volumes:
-      - miniodata:/data
-    healthcheck:
-      # The official image's HTTP health endpoint; container tooling is
-      # unverified because this file was never run.
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    networks: [internal]
-
-  # Creates the private bucket and a dedicated least-privilege service user.
-  # The application never receives the MinIO root credentials.
-  minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -eu
-        mc alias set cloud http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
-        mc mb --ignore-existing "cloud/$$CLOUD_S3_BUCKET"
-        mc anonymous set none "cloud/$$CLOUD_S3_BUCKET"
-        mc admin user info cloud "$$CLOUD_S3_ACCESS_KEY" >/dev/null 2>&1 \
-          || mc admin user add cloud "$$CLOUD_S3_ACCESS_KEY" "$$CLOUD_S3_SECRET_KEY"
-        # Replace the built-in global readwrite policy with one scoped to this
-        # bucket. The detach/remove pair makes a repeated init idempotent; the
-        # command sequence itself is not executed on this macOS worktree.
-        mc admin policy detach cloud cloud-app --user "$$CLOUD_S3_ACCESS_KEY" >/dev/null 2>&1 || true
-        mc admin policy remove cloud cloud-app >/dev/null 2>&1 || true
-        cat > /tmp/cloud-app-policy.json <<EOF
-        {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
-              "Resource": ["arn:aws:s3:::$$CLOUD_S3_BUCKET"]
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:GetObject",
-                "s3:PutObject",
-                "s3:DeleteObject",
-                "s3:AbortMultipartUpload",
-                "s3:ListMultipartUploadParts"
-              ],
-              "Resource": ["arn:aws:s3:::$$CLOUD_S3_BUCKET/*"]
-            }
-          ]
-        }
-        EOF
-        mc admin policy create cloud cloud-app /tmp/cloud-app-policy.json
-        mc admin policy attach cloud cloud-app --user "$$CLOUD_S3_ACCESS_KEY"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
-      CLOUD_S3_BUCKET: ${CLOUD_S3_BUCKET:?CLOUD_S3_BUCKET is required}
-      CLOUD_S3_ACCESS_KEY: ${CLOUD_S3_ACCESS_KEY:?CLOUD_S3_ACCESS_KEY is required}
-      CLOUD_S3_SECRET_KEY: ${CLOUD_S3_SECRET_KEY:?CLOUD_S3_SECRET_KEY is required}
-    restart: "no"
-    networks: [internal]
-
   api:
     build:
       context: ../..
@@ -125,23 +53,18 @@ services:
       CLOUD_FORWARDED_ALLOW_IPS: ${CLOUD_FORWARDED_ALLOW_IPS:?CLOUD_FORWARDED_ALLOW_IPS is required}
       CLOUD_PRIVACY_AUDIT_PATH: /var/lib/cloud/privacy-audit.jsonl
       CLOUD_VOICEPRINT_KEY: ${CLOUD_VOICEPRINT_KEY:?CLOUD_VOICEPRINT_KEY is required}
-      CLOUD_S3_ENDPOINT: minio:9000
-      CLOUD_S3_ACCESS_KEY: ${CLOUD_S3_ACCESS_KEY:?CLOUD_S3_ACCESS_KEY is required}
-      CLOUD_S3_SECRET_KEY: ${CLOUD_S3_SECRET_KEY:?CLOUD_S3_SECRET_KEY is required}
-      CLOUD_S3_BUCKET: ${CLOUD_S3_BUCKET:?CLOUD_S3_BUCKET is required}
+      CLOUD_OBJECTS_DIR: /var/lib/meeting-recorder/objects
+      CLOUD_OBJECTS_MIN_FREE_BYTES: "1073741824"
       # An empty/blocked manifest keeps model readiness false; uploads still work.
       CLOUD_MODEL_MANIFEST: /models/model-manifest.json
       CLOUD_MODEL_CACHE: /models
     volumes:
       - ${CLOUD_MODEL_CACHE_DIR:?CLOUD_MODEL_CACHE_DIR is required}:/models:ro
       - audit:/var/lib/cloud
+      - objectsdata:/var/lib/meeting-recorder
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     networks: [internal]
 
   # Explicit opt-in only: this container has no ASR processor yet. With
@@ -163,21 +86,16 @@ services:
       CLOUD_SECRET_KEY: ${CLOUD_SECRET_KEY:?CLOUD_SECRET_KEY is required}
       CLOUD_PUBLIC_BASE_URL: ${CLOUD_PUBLIC_BASE_URL:?CLOUD_PUBLIC_BASE_URL is required}
       CLOUD_VOICEPRINT_KEY: ${CLOUD_VOICEPRINT_KEY:?CLOUD_VOICEPRINT_KEY is required}
-      CLOUD_S3_ENDPOINT: minio:9000
-      CLOUD_S3_ACCESS_KEY: ${CLOUD_S3_ACCESS_KEY:?CLOUD_S3_ACCESS_KEY is required}
-      CLOUD_S3_SECRET_KEY: ${CLOUD_S3_SECRET_KEY:?CLOUD_S3_SECRET_KEY is required}
-      CLOUD_S3_BUCKET: ${CLOUD_S3_BUCKET:?CLOUD_S3_BUCKET is required}
+      CLOUD_OBJECTS_DIR: /var/lib/meeting-recorder/objects
+      CLOUD_OBJECTS_MIN_FREE_BYTES: "1073741824"
       CLOUD_MODEL_MANIFEST: /models/model-manifest.json
       CLOUD_MODEL_CACHE: /models
     volumes:
       - ${CLOUD_MODEL_CACHE_DIR:?CLOUD_MODEL_CACHE_DIR is required}:/models:ro
+      - objectsdata:/var/lib/meeting-recorder
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     networks: [internal]
 
   nginx:
@@ -209,5 +127,5 @@ networks:
 
 volumes:
   pgdata: {}
-  miniodata: {}
+  objectsdata: {}
   audit: {}

@@ -3,7 +3,7 @@
 Ordering is the contract (design §7.2):
 
 1. validate the request (size, real SHA-256, allowed codec, ids),
-2. write the object to private S3 storage,
+2. write the object to the private local object store,
 3. commit the chunk row,
 4. only then ACK.
 
