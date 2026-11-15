@@ -721,8 +721,9 @@ def run_cleanup(now: datetime) -> dict[str, int]:
             prefixes.extend(record["object_prefixes"])
 
     objects = runtime.object_store
-    # Abandoned .put-* staging files are not live objects; sweep them before the
-    # orphan pass so a crashed write can never look like a chunk to keep.
+    # Sweep abandoned .put-* staging files before the deletion passes so the
+    # reported counts and reclaimed bytes cover them too (list_objects already
+    # refuses to walk .tmp, so ordering is about counts, not safety).
     sweeper = getattr(objects, "sweep_stale_temp", None)
     if callable(sweeper):
         try:

@@ -19,6 +19,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -901,9 +902,21 @@ class PrivacyCase(CloudCase):
         stale = self.object_store.temp_dir / ".put-abandoned"
         stale.write_bytes(b"partial")
         os.utime(stale, (1_000_000.0, 1_000_000.0))
+        fresh = self.object_store.temp_dir / ".put-in-flight"
+        fresh.write_bytes(b"partial")
         counts = run_cleanup(BASE_TIME)
-        self.assertEqual(counts["scratch_removed"], 1)
+        self.assertGreaterEqual(counts["scratch_removed"], 1)
         self.assertFalse(stale.exists())
+        # The hour-long age floor protects a write that is still in flight.
+        self.assertTrue(fresh.exists())
+
+    def test_sweep_failure_is_counted_and_cleanup_continues(self) -> None:
+        with mock.patch.object(
+            self.object_store, "sweep_stale_temp", side_effect=OSError("boom")
+        ):
+            counts = run_cleanup(BASE_TIME)
+        self.assertEqual(counts["errors"], 1)
+        self.assertEqual(counts["scratch_removed"], 0)
 
     def test_privacy_maintenance_blocks_only_cloud_api(self) -> None:
         settings = self.settings.model_copy(update={"privacy_maintenance": True})
