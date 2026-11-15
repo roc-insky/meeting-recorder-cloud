@@ -266,6 +266,18 @@ class ReadinessTests(LocalStoreCase):
         with self.assertRaises(ValueError):
             LocalObjectStore(self.root, min_free_bytes=-1)
 
+    def test_sweep_returns_zero_without_temp_dir(self) -> None:
+        shutil.rmtree(self.store.temp_dir)
+        self.assertEqual(self.store.sweep_stale_temp(max_age_s=0), 0)
+
+    def test_sweep_skips_symlinks(self) -> None:
+        old = 1_000_000.0
+        link = self.store.temp_dir / ".put-link"
+        link.symlink_to(self.root / "chunks")
+        os.utime(link, (old, old), follow_symlinks=False)
+        self.assertEqual(self.store.sweep_stale_temp(max_age_s=60), 0)
+        self.assertTrue(link.is_symlink())
+
     def test_sweep_removes_only_stale_regular_files(self) -> None:
         fresh = self.store.temp_dir / ".put-fresh"
         stale = self.store.temp_dir / ".put-stale"
@@ -314,8 +326,16 @@ class FactoryTests(unittest.TestCase):
         assert store is not None
         self.assertEqual(store.min_free_bytes, 0)
 
+    def test_blank_directory_is_unconfigured(self) -> None:
+        self.assertIsNone(object_store_from_env({"CLOUD_OBJECTS_DIR": "   "}))
+
+    def test_unusable_directory_uses_documented_code(self) -> None:
+        with self.assertRaises(ObjectStoreError) as caught:
+            object_store_from_env({"CLOUD_OBJECTS_DIR": "/dev/null/nope"})
+        self.assertEqual(str(caught.exception), "unusable_objects_dir")
+
     def test_rejects_bad_reserve(self) -> None:
-        for value in ("abc", "-1"):
+        for value in ("abc", "-1", "   "):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 object_store_from_env(
                     {"CLOUD_OBJECTS_DIR": self._tmp.name, "CLOUD_OBJECTS_MIN_FREE_BYTES": value}

@@ -719,7 +719,7 @@ def object_store_from_env(env: Mapping[str, str]) -> LocalObjectStore | None:
     if not raw:
         return None
     reserve: int | None = None
-    raw_reserve = (env.get(_MIN_FREE_ENV) or "").strip()
+    raw_reserve = env.get(_MIN_FREE_ENV) or ""
     if raw_reserve:
         # A bad value must fail start-up instead of silently falling back.
         reserve = int(raw_reserve)
