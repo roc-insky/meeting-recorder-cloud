@@ -120,7 +120,7 @@ def _estimate_build_bytes(plan: _Plan) -> int:
         plan.input_bytes
         + pcm * (2 * tracks + 1)      # decoded spans + track PCM + mix PCM
         + 2 * pcm * (tracks + 1)      # scratch WAVs + their store copies
-        + 44 * (tracks + 1)           # WAV headers
+        + 88 * (tracks + 1)           # WAV headers
         + MAX_STDERR_BYTES
     )
 
