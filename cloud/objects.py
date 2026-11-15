@@ -203,10 +203,25 @@ class LocalObjectStore:
             if directory == self.root:
                 return
 
+    def _make_parents(self, target: Path) -> None:
+        """Create missing key directories, each 0750 regardless of umask.
+
+        Path.mkdir(parents=True, mode=...) applies the mode to the leaf only,
+        so intermediate directories would be 0777 & ~umask (spec 8.3 wants 0750).
+        """
+        missing: list[Path] = []
+        current = target.parent
+        while current != self.root and not current.exists():
+            missing.append(current)
+            current = current.parent
+        for directory in reversed(missing):
+            directory.mkdir(mode=0o750, exist_ok=True)
+            os.chmod(directory, 0o750)
+
     def _publish(self, stage: Path, target: Path, expected: int) -> None:
         if stage.stat().st_size != expected:
             raise ObjectStoreError("object_size_mismatch")
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        self._make_parents(target)
         os.replace(stage, target)
         os.chmod(target, 0o640)
         # The rename is durable only once every directory entry from the leaf up

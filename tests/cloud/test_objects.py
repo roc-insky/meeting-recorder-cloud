@@ -47,6 +47,13 @@ class WriteTests(LocalStoreCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         self.assertEqual(list(self.store.temp_dir.iterdir()), [])
 
+    def test_put_creates_every_parent_at_0750(self) -> None:
+        self.store.put_verified(self.KEY, b"frames", sha(b"frames"))
+        directory = (self.root / self.KEY).parent
+        while directory != self.root:
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o750, directory)
+            directory = directory.parent
+
     def test_put_rejects_traversal(self) -> None:
         for key in (
             "../escape",
