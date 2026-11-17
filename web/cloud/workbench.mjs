@@ -8,10 +8,10 @@
 // Node 22 / evergreen browser compatible: DOM, fetch, AbortController only.
 
 import { createCloudSession } from "./session.mjs";
+import { LOGIN_PATH, renderLoginGate } from "./gate.mjs";
 
 const SESSION_PATH = "/api/cloud/auth/session";
 const MEETINGS_PATH = "/api/cloud/meetings?limit=20";
-const LOGIN_PATH = "/api/cloud/auth/login";
 
 const KIND_LABELS = Object.freeze({ note: "笔记", highlight: "重点", comment: "注释" });
 const STATUS_LABELS = Object.freeze({
@@ -403,23 +403,9 @@ function fillRecordingStrip(strip, doc, state) {
 // ---------------------------------------------------------------------------
 
 function buildLoginGate(doc, state) {
-  const section = el(doc, "section", {
-    className: "login-gate",
-    attrs: { "data-testid": "login-gate", "aria-labelledby": "login-gate-heading" },
-  });
-  const loginHref = typeof state.loginUrl === "string" && state.loginUrl ? state.loginUrl : LOGIN_PATH;
-  section.append(
-    el(doc, "h1", { text: "请先登录", attrs: { id: "login-gate-heading" } }),
-    el(doc, "p", {
-      text: "登录后才能查看自己的会议记录。未登录时不会请求麦克风权限，也不会显示任何会议内容。",
-    }),
-    el(doc, "a", {
-      className: "btn btn--primary",
-      text: "登录",
-      attrs: { href: loginHref, "data-testid": "login-link" },
-    }),
-  );
-  return section;
+  // 登录门本身是共用模块（web/cloud/gate.mjs），含邮箱表单与 next 跳回。
+  const loginPath = typeof state.loginUrl === "string" && state.loginUrl ? state.loginUrl : LOGIN_PATH;
+  return renderLoginGate(doc, { loginPath });
 }
 
 function errorText(error) {
@@ -889,19 +875,6 @@ function buildAnnotationsPanel(doc, state) {
   return details;
 }
 
-function buildSectionNav(doc) {
-  const nav = el(doc, "nav", {
-    className: "section-nav",
-    attrs: { "aria-label": "工作台分区", "data-testid": "section-nav" },
-  });
-  nav.append(
-    el(doc, "a", { text: "文字稿", attrs: { href: "#transcript-section" } }),
-    el(doc, "a", { text: "标注", attrs: { href: "#annotations-section" } }),
-    el(doc, "a", { text: "历史记录", attrs: { href: "#history-panel" } }),
-  );
-  return nav;
-}
-
 function buildBanner(doc, state) {
   const recording = normalizeRecording(state.recording);
   const viewedId = state.meeting ? state.meeting.id : null;
@@ -936,21 +909,35 @@ export function renderWorkbench(root, state) {
     attrs: { "data-testid": "workbench" },
   });
   workbench.append(el(doc, "h1", { className: "visually-hidden", text: "当前会议工作台" }));
-  workbench.append(buildRecordingStrip(doc, settings));
+  // 录音控件与实时文本是页面长期持有的节点（录音中不能被重渲染销毁），
+  // 这里只负责把它们放进三栏：左栏录音状态与控件，中栏文字稿，右栏注释。
+  const recorderPanel = settings.recorderPanel || null;
+  const livePanel = settings.livePanel || null;
+  const grid = el(doc, "div", { className: "workbench-grid" });
+  const rail = el(doc, "div", {
+    className: "workbench-rail",
+    attrs: { "data-testid": "workbench-rail" },
+  });
+  rail.append(buildRecordingStrip(doc, settings));
+  if (recorderPanel) rail.append(recorderPanel);
+  const main = el(doc, "div", {
+    className: "workbench-main",
+    attrs: { "data-testid": "workbench-main" },
+  });
   if (!settings.meeting) {
-    workbench.append(buildStatusPanel(doc, settings));
+    main.append(buildStatusPanel(doc, settings));
+    grid.append(rail, main);
+    workbench.append(grid);
     root.append(workbench);
     return;
   }
+  rail.append(buildHistoryPanel(doc, settings));
   const banner = buildBanner(doc, settings);
   if (banner) workbench.append(banner);
-  workbench.append(buildSectionNav(doc));
-  const grid = el(doc, "div", { className: "workbench-grid" });
-  grid.append(
-    buildHistoryPanel(doc, settings),
-    buildTranscriptPanel(doc, settings),
-    buildAnnotationsPanel(doc, settings),
-  );
+  const transcript = buildTranscriptPanel(doc, settings);
+  if (livePanel) transcript.prepend(livePanel);
+  main.append(transcript);
+  grid.append(rail, main, buildAnnotationsPanel(doc, settings));
   workbench.append(grid);
   root.append(workbench);
 }
@@ -988,6 +975,8 @@ export function mountWorkbench(root, options) {
     annotations: [],
     audioUrl: null,
     recording: null,
+    recorderPanel: settings.recorderPanel || null,
+    livePanel: settings.livePanel || null,
     viewingHistory: false,
     form: {
       kind: "note",
@@ -1073,6 +1062,31 @@ export function mountWorkbench(root, options) {
     };
   }
 
+  function buildLogoutButton() {
+    const button = el(doc, "button", {
+      className: "account-logout",
+      text: "退出登录",
+      attrs: { type: "button", "data-testid": "logout-button" },
+    });
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await client.request("/api/cloud/auth/logout", { method: "POST" });
+      } catch {
+        // 会话可能已经失效，直接回登录门。
+      }
+      if (typeof settings.onSessionExpired === "function") {
+        settings.onSessionExpired();
+        return;
+      }
+      state.loginRequired = true;
+      state.session = null;
+      lastRenderKey = null;
+      render();
+    });
+    return button;
+  }
+
   function updateAccount() {
     if (!accountEl) return;
     accountEl.replaceChildren();
@@ -1080,6 +1094,7 @@ export function mountWorkbench(root, options) {
     if (typeof userId === "string" && userId) {
       const short = userId.length > 12 ? userId.slice(0, 8) + "…" + userId.slice(-2) : userId;
       accountEl.append(el(doc, "span", { className: "account-id", text: "账号 " + short }));
+      accountEl.append(buildLogoutButton());
     } else if (state.loginRequired) {
       accountEl.append(
         el(doc, "a", {
@@ -1542,6 +1557,10 @@ export function mountWorkbench(root, options) {
         state.history = [];
         state.loading = false;
         state.error = null;
+        if (typeof settings.onSessionExpired === "function") {
+          settings.onSessionExpired();
+          return;
+        }
         lastRenderKey = null;
         render();
         return;

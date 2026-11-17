@@ -133,6 +133,19 @@ export class UploadPump {
   }
 }
 
+// The server stores integer milliseconds (TrackManifest.end_ms is an int), while
+// the recorder clock is fractional. Round outward, matching putChunk's ranges.
+function wireManifest(manifest) {
+  if (!manifest || !Array.isArray(manifest.tracks)) return manifest;
+  return {
+    ...manifest,
+    tracks: manifest.tracks.map((track) => ({
+      ...track,
+      end_ms: Number.isFinite(track.end_ms) ? Math.max(0, Math.ceil(track.end_ms)) : track.end_ms,
+    })),
+  };
+}
+
 export function createHttpTransport({ session, baseUrl = "" } = {}) {
   if (!session || typeof session.request !== "function") {
     throw new UploadError("cloud session is required");
@@ -183,7 +196,7 @@ export function createHttpTransport({ session, baseUrl = "" } = {}) {
       return session.request(baseUrl ? new URL(path, baseUrl).toString() : path, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: manifest,
+        body: wireManifest(manifest),
       });
     },
   };

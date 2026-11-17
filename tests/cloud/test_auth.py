@@ -284,6 +284,80 @@ class LoginCase(CloudCase):
         self.assertNotIn("alice", response.text)
         self.assertNotIn("example.test", response.text)
 
+    def test_login_next_redirects_to_original_page(self):
+        client = TestClient(self.app, follow_redirects=False)
+        start = client.get(
+            "/api/cloud/auth/login",
+            params={"email": A_EMAIL, "next": "/voiceprints.html"},
+        )
+        self.assertEqual(start.status_code, 303)
+        start_cookies = start.headers.get_list("set-cookie")
+        next_header = next(h for h in start_cookies if h.startswith("cloud_login_next="))
+        self.assertIn("HttpOnly", next_header)
+        self.assertIn("SameSite=lax", next_header)
+
+        authorize = client.get(start.headers["location"])
+        self.assertEqual(authorize.status_code, 303)
+        finished = client.get(authorize.headers["location"])
+        self.assertEqual(finished.status_code, 303)
+        self.assertTrue(finished.headers["location"].endswith("/voiceprints.html"))
+
+        headers = finished.headers.get_list("set-cookie")
+        self.assertTrue(any(h.startswith("cloud_session=") for h in headers))
+        self.assertTrue(any(h.startswith("cloud_csrf=") for h in headers))
+        self.assertTrue(
+            any(
+                h.startswith("cloud_login_next=") and "Max-Age=0" in h
+                for h in headers
+            )
+        )
+        self.assertEqual(client.get("/api/cloud/auth/session").status_code, 200)
+
+    def test_login_next_rejects_offsite_or_unsafe_targets(self):
+        unsafe = (
+            "//evil.example.com/a",
+            "/a\\b",
+            "https://evil.example.com/a",
+            "/a\x00b",
+            "/" + "a" * 512,
+            "",
+        )
+        for next_value in unsafe:
+            with self.subTest(next=next_value):
+                client = TestClient(self.app, follow_redirects=False)
+                start = client.get(
+                    "/api/cloud/auth/login",
+                    params={"email": A_EMAIL, "next": next_value},
+                )
+                self.assertEqual(start.status_code, 303)
+                self.assertFalse(
+                    any(
+                        h.startswith("cloud_login_next=")
+                        for h in start.headers.get_list("set-cookie")
+                    )
+                )
+                authorize = client.get(start.headers["location"])
+                self.assertEqual(authorize.status_code, 303)
+                finished = client.get(authorize.headers["location"])
+                self.assertEqual(finished.status_code, 200)
+                self.assertIn("csrf_token", finished.json())
+
+    def test_login_without_next_keeps_json_response(self):
+        client = TestClient(self.app, follow_redirects=False)
+        start = client.get("/api/cloud/auth/login", params={"email": A_EMAIL})
+        self.assertEqual(start.status_code, 303)
+        self.assertFalse(
+            any(
+                h.startswith("cloud_login_next=")
+                for h in start.headers.get_list("set-cookie")
+            )
+        )
+        authorize = client.get(start.headers["location"])
+        self.assertEqual(authorize.status_code, 303)
+        finished = client.get(authorize.headers["location"])
+        self.assertEqual(finished.status_code, 200)
+        self.assertIn("csrf_token", finished.json())
+
     def test_session_cookie_flags_and_logout(self):
         client = TestClient(self.app, follow_redirects=False)
         start = client.get("/api/cloud/auth/login", params={"email": A_EMAIL})

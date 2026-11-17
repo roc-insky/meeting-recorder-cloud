@@ -1,5 +1,6 @@
 // 视觉草案，未获 G4 批准：本模块只保证真实录音、真实接口与可达性，尚未完成视觉签收。
 import { createCloudSession } from "./session.mjs";
+import { currentPath, renderLoginGate, setGuestMode } from "./gate.mjs";
 
 const PROFILES_PATH = "/api/cloud/voiceprints";
 const TASKS_PATH = "/api/cloud/voiceprints/tasks";
@@ -230,33 +231,6 @@ export function mountVoiceprints(root, options = {}) {
     }
   }
 
-  function buildLoginGate() {
-    const gate = element(doc, "section", {
-      className: "status-panel login-gate",
-      "data-testid": "login-gate",
-    });
-    gate.append(
-      element(doc, "h1", {}, "我的声纹库"),
-      element(
-        doc,
-        "p",
-        {},
-        "登录后才能登记或撤销你自己的声纹。声纹不会跨账号或平台匹配。",
-      ),
-      element(
-        doc,
-        "a",
-        {
-          className: "btn btn--primary",
-          href: state.loginUrl || client.loginUrl(),
-          "data-testid": "login-link",
-        },
-        "登录后管理声纹",
-      ),
-    );
-    return gate;
-  }
-
   function buildProfileCard(profile, index) {
     const card = element(doc, "li", {
       className: "profile-card",
@@ -340,32 +314,17 @@ export function mountVoiceprints(root, options = {}) {
         "声纹只用于识别你自己的会议记录，不会跨账号或平台匹配。",
       ),
     );
-    header.append(
-      headingBlock,
-      element(
-        doc,
-        "button",
-        {
-          className: "btn btn--primary",
-          type: "button",
-          "data-testid": "enroll-open",
-          "data-action": "enroll",
-        },
-        "新增声纹",
-      ),
-    );
+    header.append(headingBlock);
     page.append(header);
 
-    page.append(
-      element(
-        doc,
-        "p",
-        {
-          className: "notice notice--blocking voiceprint-disclosure",
-          "data-testid": "revoke-disclosure",
-        },
-        "撤销只停止后续识别，不会自动改写已生成文字稿中的姓名；如需历史匿名化必须另行重跑。",
-      ),
+    const disclosure = element(
+      doc,
+      "p",
+      {
+        className: "notice notice--blocking voiceprint-disclosure",
+        "data-testid": "revoke-disclosure",
+      },
+      "撤销只停止后续识别，不会自动改写已生成文字稿中的姓名；如需历史匿名化必须另行重跑。",
     );
 
     const pageStatus = element(doc, "p", {
@@ -443,15 +402,111 @@ export function mountVoiceprints(root, options = {}) {
         ),
       );
     }
-    page.append(listSection);
+    // 三栏：左栏登记入口，中栏声纹列表，右栏撤销与使用说明。
+    const grid = element(doc, "div", { className: "page-grid" });
+
+    const rail = element(doc, "aside", {
+      className: "page-rail",
+      "data-testid": "voiceprints-rail",
+      "aria-label": "声纹登记",
+    });
+    const enrollCard = element(doc, "section", {
+      className: "panel entry-panel",
+      "data-testid": "enroll-panel",
+      "aria-labelledby": "enroll-panel-title",
+    });
+    const enrollBody = element(doc, "div", { className: "panel-body" });
+    enrollBody.append(
+      element(doc, "h2", { id: "enroll-panel-title" }, "登记声纹"),
+      element(
+        doc,
+        "p",
+        { className: "field-hint" },
+        "录制一段本人语音，会议文字稿里就能认出是谁在说话。",
+      ),
+      element(
+        doc,
+        "button",
+        {
+          className: "btn btn--primary",
+          type: "button",
+          "data-testid": "enroll-open",
+          "data-action": "enroll",
+        },
+        "新增声纹",
+      ),
+    );
+    enrollCard.append(enrollBody);
+    rail.append(enrollCard);
+
+    const main = element(doc, "div", {
+      className: "page-main",
+      "data-testid": "voiceprints-main",
+    });
+    main.append(listSection);
+
+    const side = element(doc, "aside", {
+      className: "page-side",
+      "data-testid": "voiceprints-side",
+      "aria-label": "说明",
+    });
+    const guide = element(doc, "section", {
+      className: "panel guide-panel",
+      "aria-labelledby": "voiceprint-guide-title",
+    });
+    const guideBody = element(doc, "div", { className: "panel-body" });
+    guideBody.append(
+      element(doc, "h2", { id: "voiceprint-guide-title" }, "使用须知"),
+      element(
+        doc,
+        "ul",
+        { className: "guide-list" },
+        element(doc, "li", {}, "声纹只匹配你自己的会议记录，不会跨账号或平台比对。"),
+        element(doc, "li", {}, "每段录音只用于提取本人声纹，保存的是声纹模型，不是原始音频。"),
+        element(doc, "li", {}, "替换成功后旧版本失效；失败时仍保留旧版本，识别不受影响。"),
+      ),
+    );
+    guide.append(guideBody);
+    side.append(disclosure, guide);
+
+    grid.append(rail, main, side);
+    page.append(grid);
     return page;
+  }
+
+  function buildSessionError() {
+    const panel = element(doc, "section", {
+      className: "status-panel error-state",
+      "data-testid": "page-error",
+      role: "alert",
+    });
+    panel.append(
+      element(doc, "p", {}, state.error),
+      element(
+        doc,
+        "button",
+        {
+          className: "btn",
+          type: "button",
+          "data-action": "retry",
+          "data-testid": "retry-load",
+        },
+        "重试",
+      ),
+    );
+    return panel;
   }
 
   function render() {
     renderAccount();
+    setGuestMode(doc, state.loginRequired);
     root.replaceChildren();
     if (state.loginRequired) {
-      root.append(buildLoginGate());
+      root.append(renderLoginGate(doc, { next: currentPath(doc) }));
+      return;
+    }
+    if (!state.session && state.error) {
+      root.append(buildSessionError());
       return;
     }
     root.append(buildLibrary());
@@ -480,14 +535,16 @@ export function mountVoiceprints(root, options = {}) {
     state.loading = true;
     state.error = "";
     state.loginRequired = false;
-    render();
     try {
+      // 会话检查必须先于任何业务 UI：未登录时页面只留登录卡片。
       const session = await client.session();
       if (!session) {
         requireLogin();
         return;
       }
       state.session = session;
+      setGuestMode(doc, false);
+      render();
       await refreshProfiles();
     } catch (problem) {
       if (isUnauthorized(problem)) {
@@ -497,7 +554,7 @@ export function mountVoiceprints(root, options = {}) {
       state.error = pageErrorText(problem);
     } finally {
       state.loading = false;
-      render();
+      if (!state.loginRequired) render();
     }
   }
 
@@ -1209,7 +1266,6 @@ export function mountVoiceprints(root, options = {}) {
   const handlePageHide = () => teardownSession(true);
   win.addEventListener("pagehide", handlePageHide);
 
-  render();
   void loadPage();
 
   return {

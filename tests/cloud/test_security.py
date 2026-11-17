@@ -795,7 +795,11 @@ class SecurityCase(CloudCase):
 
         # Secrets carried in cookies, CSRF headers and provider codes are never
         # echoed in an error body, response header or application log.
-        raw_cookie = self.app_client(raise_server_exceptions=False)
+        # A freshly built app_client copies account A's real cookies, so a
+        # forged cookie could ride along next to a valid one. Use a bare client
+        # to prove the forged token on its own is rejected.
+        raw_cookie = TestClient(self.app, raise_server_exceptions=False)
+        self.addCleanup(raw_cookie.close)
         raw_cookie.cookies.set("cloud_session", SENTINEL, path="/")
         response = raw_cookie.get("/api/cloud/meetings")
         self.expect(response, 401, "authentication_required")

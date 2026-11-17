@@ -52,6 +52,8 @@ from cloud.settings import Settings
 router = APIRouter(prefix="/api/cloud/auth", tags=["auth"])
 
 _MAX_COOKIE_TOKEN_LENGTH = 512
+_MAX_NEXT_PATH_LENGTH = 512
+_LOGIN_NEXT_COOKIE_NAME = "cloud_login_next"
 
 
 # -- identity provider seam ------------------------------------------------
@@ -187,6 +189,39 @@ def _set_csrf_cookie(response: Response, settings: Settings, token: str, max_age
     )
 
 
+def _safe_next_path(value: object) -> str | None:
+    """Return a same-origin path safe to redirect to, otherwise None.
+
+    Only absolute paths on this origin are allowed: a leading double slash or
+    a scheme would send the browser to another site, and a backslash or control
+    character can be normalized into one by some clients.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > _MAX_NEXT_PATH_LENGTH:
+        return None
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return None
+    if "\\" in candidate:
+        return None
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in candidate):
+        return None
+    return candidate
+
+
+def _set_login_next_cookie(response: Response, settings: Settings, next_path: str) -> None:
+    response.set_cookie(
+        _LOGIN_NEXT_COOKIE_NAME,
+        next_path,
+        max_age=settings.login_state_ttl_s,
+        httponly=True,
+        samesite="lax",
+        secure=settings.cookie_secure,
+        path="/",
+    )
+
+
 def _clear_auth_cookies(response: Response, settings: Settings) -> None:
     response.delete_cookie(
         settings.session_cookie_name,
@@ -289,6 +324,7 @@ def _require_same_origin(request: Request, settings: Settings) -> None:
 def start_login(
     request: Request,
     email: str | None = None,
+    next: str | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
     settings = _settings(request)
@@ -312,6 +348,9 @@ def start_login(
     )
     response = RedirectResponse(url, status_code=303)
     _set_session_cookie(response, settings, raw_token, settings.login_state_ttl_s)
+    next_path = _safe_next_path(next)
+    if next_path is not None:
+        _set_login_next_cookie(response, settings, next_path)
     return response
 
 
@@ -417,12 +456,20 @@ def login_callback(
     db.add(session)
     db.commit()
 
-    body = SessionView(
-        user_id=user.id, csrf_token=csrf_token, expires_at=iso_utc(session.expires_at)
-    )
-    response = JSONResponse(body.model_dump(mode="json"))
+    next_path = _safe_next_path(request.cookies.get(_LOGIN_NEXT_COOKIE_NAME))
+    if next_path is None:
+        body = SessionView(
+            user_id=user.id, csrf_token=csrf_token, expires_at=iso_utc(session.expires_at)
+        )
+        response: Response = JSONResponse(body.model_dump(mode="json"))
+    else:
+        # The browser should land back on the page that started the login
+        # instead of a JSON body; the cookies are planted on the redirect.
+        response = RedirectResponse(next_path, status_code=303)
     _set_session_cookie(response, settings, raw_token, settings.session_ttl_s)
     _set_csrf_cookie(response, settings, csrf_token, settings.session_ttl_s)
+    if next_path is not None:
+        response.delete_cookie(_LOGIN_NEXT_COOKIE_NAME, path="/")
     return response
 
 

@@ -18,3 +18,5 @@ config.toml
 
 # 真实会议评估数据（含隐私，只放本机）
 eval/
+
+.cloud-dev/

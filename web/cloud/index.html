@@ -19,8 +19,70 @@
     </header>
     <main id="workbench-root" class="workbench-root" tabindex="-1"></main>
     <script type="module">
+      import { createCloudSession } from "./session.mjs";
       import { mountWorkbench } from "./workbench.mjs";
-      mountWorkbench(document.getElementById("workbench-root"));
+      import { mountRecorder } from "./recorder.mjs";
+      import { currentPath, renderLoginGate, setGuestMode } from "./gate.mjs";
+
+      const root = document.getElementById("workbench-root");
+      const client = createCloudSession();
+      let workbench = null;
+      let recorder = null;
+
+      // 未登录：整页只留登录卡片，录音控件、三栏、账号区都不挂载。
+      function showLoginGate(message) {
+        if (workbench) {
+          workbench.destroy();
+          workbench = null;
+        }
+        recorder = null;
+        root.replaceChildren(
+          renderLoginGate(document, { next: currentPath(document), message }),
+        );
+      }
+
+      function mountBoard(meetingId) {
+        setGuestMode(document, false);
+        if (workbench) workbench.destroy();
+        workbench = mountWorkbench(root, {
+          client,
+          initialMeetingId: typeof meetingId === "string" ? meetingId : null,
+          recorderPanel: recorder ? recorder.panel : null,
+          livePanel: recorder ? recorder.liveCard : null,
+          onSessionExpired: () => showLoginGate(),
+        });
+      }
+
+      const showMeeting = (meetingId) => mountBoard(meetingId);
+
+      async function boot() {
+        let session = null;
+        try {
+          session = await client.session();
+        } catch (error) {
+          showLoginGate(
+            error && error.status === 401
+              ? undefined
+              : "暂时无法确认登录状态，请重新登录后重试。",
+          );
+          return;
+        }
+        if (!session || !session.user_id) {
+          showLoginGate();
+          return;
+        }
+        // 录音面板只挂载一次，之后由工作台把它放进左栏、实时文本放进中栏；
+        // 重渲染只移动节点，不销毁录音状态。
+        recorder = mountRecorder(document.createElement("div"), {
+          client,
+          onMeeting: showMeeting,
+          onFinished: showMeeting,
+          onSessionExpired: () => showLoginGate(),
+        });
+        mountBoard(null);
+      }
+
+      void boot();
     </script>
   </body>
 </html>

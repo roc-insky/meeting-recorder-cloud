@@ -167,6 +167,28 @@ select {
   color: var(--secondary);
 }
 
+.account-logout {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.account-logout:hover {
+  border-color: var(--secondary);
+}
+
+/* 未登录：整页只有登录门，导航与账号区不出现。 */
+body.auth-guest .app-nav,
+body.auth-guest #account {
+  display: none;
+}
+
 .workbench-root {
   display: block;
   max-width: 1280px;
@@ -337,20 +359,6 @@ select {
   border-left-color: var(--warning);
 }
 
-.section-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  font-size: 14px;
-}
-
-.section-nav a {
-  padding: 8px 4px;
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-}
-
 .workbench-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -358,31 +366,43 @@ select {
   align-items: start;
 }
 
+.workbench-rail,
+.workbench-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
 @media (min-width: 768px) {
   .workbench-grid {
     grid-template-columns: 240px minmax(0, 1fr);
   }
 
-  .history-panel {
+  .workbench-rail,
+  .workbench-main {
     grid-column: 1;
+    grid-row: 1;
   }
 
-  .transcript-panel {
+  .workbench-main {
     grid-column: 2;
   }
 
   .annotations-panel {
     grid-column: 1 / -1;
+    grid-row: 2;
   }
 }
 
 @media (min-width: 1280px) {
   .workbench-grid {
-    grid-template-columns: 240px minmax(0, 1fr) 340px;
+    grid-template-columns: 280px minmax(0, 1fr) 340px;
   }
 
   .annotations-panel {
     grid-column: 3;
+    grid-row: 1;
   }
 }
 
@@ -498,6 +518,13 @@ select {
 }
 
 /* --- History --- */
+
+/* 历史列表在左栏里内部滚动，避免会议一多就把整页拉得很长。 */
+.workbench-rail .history-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
 
 .history-list {
   list-style: none;
@@ -715,7 +742,7 @@ select {
   overflow-wrap: anywhere;
 }
 
-input,
+input:not([type="checkbox"]):not([type="radio"]),
 select,
 textarea {
   width: 100%;
@@ -847,11 +874,65 @@ textarea {
   display: grid;
   gap: 12px;
   justify-items: start;
-  padding: 32px 20px;
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 32px 24px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+.login-gate p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.login-form {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  width: 100%;
+}
+
+.login-field {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+.login-email {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.login-email[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+.login-error {
+  margin: 0;
+  color: var(--error);
+}
+
+.login-error[hidden] {
+  display: none;
+}
+
+.login-submit {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 24px;
+  cursor: pointer;
 }
 
 /* --- Dialog --- */
@@ -1212,12 +1293,93 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* 左栏职位列表：点击标题在中栏看详情 */
+.position-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.position-list-item {
+  min-width: 0;
+}
+
+.position-item {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.position-item:hover {
+  border-color: var(--primary);
+  background: var(--muted-bg);
+}
+
+.position-item:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.position-item.is-selected {
+  border-color: var(--primary);
+  background: var(--muted-bg);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.position-item-title {
+  font-weight: 600;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.position-item-type {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.position-empty {
+  margin: 0;
+}
+
+/* 中栏职位详情：超过视口一半时折叠 */
+.position-detail {
+  scroll-margin-top: 12px;
+}
+
+.position-detail .panel-body {
+  gap: 10px;
+}
+
 .position-summary {
-  padding: 12px;
-  border-radius: 6px;
+  position: relative;
+  padding: 12px 14px;
+  border-radius: var(--radius);
   background: var(--muted-bg);
   min-width: 0;
   overflow-wrap: anywhere;
+  overflow: hidden;
+}
+
+.position-summary.is-clamped::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 48px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--muted-bg));
 }
 
 .position-summary p {
@@ -1230,27 +1392,120 @@ textarea {
 
 .position-summary-title {
   font-weight: 700;
-  font-size: 18px;
+  font-size: 20px;
+  line-height: 1.35;
 }
 
-.position-summary-meta,
-.position-summary-requirements {
+.position-summary-meta {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
   color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.position-summary-requirements {
+  margin-top: 10px !important;
+  color: var(--text);
   font-size: 14px;
+  line-height: 1.75;
   white-space: pre-wrap;
 }
 
-.position-editor {
-  display: grid;
-  gap: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
+/* 展开/折叠：详情卡片右下角，普通按钮大小 */
+.position-detail-foot {
+  display: flex;
+  justify-content: flex-end;
   min-width: 0;
 }
 
-.position-editor h3 {
+.position-detail .position-detail-toggle {
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 34px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* 中栏新建职位表单：作为独立卡片，不再挤在左栏 */
+.position-editor .panel-body {
+  gap: 10px;
+}
+
+.position-editor h2 {
   margin: 0;
-  font-size: 18px;
+}
+
+/* 右栏面试题：卡片化 + 可滚动正文 */
+.result-panel .panel-body {
+  gap: 12px;
+}
+
+.result-panel .form-status {
+  color: var(--success);
+  font-size: 13px;
+}
+
+.result-panel .markdown {
+  max-height: 62vh;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.04);
+  overscroll-behavior: contain;
+}
+
+.result-panel .markdown h1,
+.result-panel .markdown h2,
+.result-panel .markdown h3 {
+  padding-left: 10px;
+  border-left: 3px solid var(--primary);
+  line-height: 1.4;
+}
+
+.result-panel .markdown h1 {
+  font-size: 20px;
+}
+
+.result-panel .markdown h2 {
+  font-size: 17px;
+}
+
+.result-panel .markdown h3 {
+  font-size: 15px;
+  border-left-color: var(--border);
+}
+
+.result-panel .markdown ul,
+.result-panel .markdown ol {
+  padding-left: 1.4em;
+}
+
+.result-panel .markdown li + li {
+  margin-top: 6px;
+}
+
+.result-panel .markdown blockquote {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+  background: var(--muted-bg);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.result-panel .markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
 }
 
 .file-input {
@@ -1368,4 +1623,192 @@ textarea {
   .interview .panel-body {
     padding: 12px;
   }
+}
+
+/* 浏览器录音面板：控件在左栏，实时文本卡片在中栏。 */
+.recorder-panel {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.recorder-heading {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+.recorder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.recorder-title {
+  flex: 1 1 100%;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.recorder-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  color: var(--text);
+  cursor: pointer;
+}
+.recorder-live input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--primary);
+}
+.recorder-button {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 20px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: var(--primary-contrast);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.recorder-button.is-recording {
+  background: var(--recording);
+  color: #fff;
+}
+.recorder-button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.recorder-status {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+.recorder-status[data-tone="error"] { color: var(--error); }
+.recorder-status[data-tone="recording"] { color: var(--recording); font-weight: 600; }
+.recorder-status[data-tone="success"] { color: var(--success); }
+.recorder-status[data-tone="warning"] { color: var(--warning); }
+.recorder-note {
+  margin: 8px 0 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.recorder-live-list {
+  margin: 0;
+  padding: 8px 12px 8px 28px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--muted-bg);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  list-style: none;
+}
+.recorder-live-list li { padding: 2px 0; }
+
+.recorder-live-card {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.recorder-live-card[hidden] {
+  display: none;
+}
+
+.recorder-live-heading {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+/* --- 三栏页面骨架：声纹登记 / 职位与面试 --- */
+
+.voiceprints,
+.interview {
+  max-width: 1248px;
+}
+
+.page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  min-width: 0;
+}
+
+.page-rail,
+.page-main,
+.page-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.entry-panel .btn {
+  width: 100%;
+}
+
+.guide-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.guide-list li {
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 768px) {
+  .page-grid {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  .page-rail {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .page-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .page-side {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+@media (min-width: 1280px) {
+  .page-grid {
+    grid-template-columns: 280px minmax(0, 1fr) 340px;
+  }
+
+  .page-side {
+    grid-column: 3;
+    grid-row: 1;
+  }
+}
+
+/* 面试页右栏常驻：生成结果后隐去占位说明，三栏骨架保持不变。 */
+.page-side:has(.result-panel:not([hidden])) [data-testid="result-placeholder"] {
+  display: none;
 }
