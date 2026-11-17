@@ -136,7 +136,8 @@ test.beforeEach(async ({ context }) => {
 
 async function openInterview(page, title = "后端工程师") {
   await page.goto(PAGE);
-  await expect(page.getByTestId("position-select")).toBeVisible();
+  await expect(page.getByTestId("position-list")).toBeVisible();
+  await expect(page.getByTestId("position-item").first()).toBeVisible();
   await expect(page.getByTestId("selected-position-title")).toHaveText(title);
 }
 
@@ -281,6 +282,10 @@ test("creates a position, submits by keyboard and moves focus to the result", as
   await openInterview(page);
 
   await page.getByTestId("position-create-open").click();
+  await expect(
+    page.getByTestId("interview-main").getByTestId("position-editor"),
+  ).toBeVisible();
+  await expect(page.getByTestId("interview-rail").getByTestId("position-editor")).toHaveCount(0);
   await expect(page.getByTestId("position-type")).toBeFocused();
   await expect(page.getByTestId("position-type").locator("option")).toHaveCount(4);
   await page.getByTestId("position-type").selectOption("测试");
@@ -292,7 +297,9 @@ test("creates a position, submits by keyboard and moves focus to the result", as
   await expect(page.getByTestId("selected-position-title")).toHaveText("测试工程师");
   await expect(page.getByTestId("selected-position-type")).toHaveText("职位类型：测试");
   await expect(page.getByTestId("page-status")).toHaveText("职位已保存。");
-  await expect(page.getByTestId("position-select")).toBeFocused();
+  await expect(
+    page.locator('[data-testid="position-item"][aria-current="true"]'),
+  ).toBeFocused();
   expect(state.positionCreates).toHaveLength(1);
   expect(state.positionCreates[0].body).toEqual({
     type: "测试",
@@ -314,6 +321,53 @@ test("creates a position, submits by keyboard and moves focus to the result", as
   await expect(page.getByTestId("result-panel")).toBeHidden();
   await expect(page.getByTestId("resume-input")).toBeFocused();
   await expect(page.getByTestId("result-markdown")).toBeEmpty();
+});
+
+test("lists positions without a select and collapses long details in the middle column", async ({ page }) => {
+  const longRequirements = Array.from(
+    { length: 40 },
+    (_, index) => "第 " + (index + 1) + " 条：熟悉研发流程、质量保障与跨团队协作。",
+  ).join("\n");
+  await mockApi(page, { positions: [makePosition({ requirements: longRequirements })] });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openInterview(page);
+
+  await expect(page.getByTestId("position-list").locator("select")).toHaveCount(0);
+  await expect(page.getByTestId("position-select")).toHaveCount(0);
+  await expect(
+    page.getByTestId("position-list").getByTestId("position-item"),
+  ).toHaveCount(1);
+  await expect(
+    page.getByTestId("interview-main").getByTestId("position-detail"),
+  ).toBeVisible();
+
+  const detail = page.getByTestId("position-summary");
+  const toggle = page.getByTestId("position-detail-toggle");
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveText("展开");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  const collapsed = await detail.evaluate((node) => node.getBoundingClientRect().height);
+  expect(collapsed).toBeLessThanOrEqual(361);
+
+  await expect(
+    page.getByTestId("position-detail").locator(".interview-section-head [data-testid=\"position-detail-toggle\"]"),
+  ).toHaveCount(0);
+  const toggleBox = await toggle.boundingBox();
+  const summaryBox = await detail.boundingBox();
+  const detailBox = await page.getByTestId("position-detail").boundingBox();
+  expect(toggleBox.height).toBeLessThanOrEqual(40);
+  expect(toggleBox.y).toBeGreaterThan(summaryBox.y + summaryBox.height - 1);
+  expect(toggleBox.x + toggleBox.width).toBeGreaterThan(detailBox.x + detailBox.width / 2);
+
+  await toggle.click();
+  await expect(toggle).toHaveText("折叠");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  const expanded = await detail.evaluate((node) => node.getBoundingClientRect().height);
+  expect(expanded).toBeGreaterThan(collapsed);
+
+  await toggle.click();
+  await expect(toggle).toHaveText("展开");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
 });
 
 test("fits 320px, keeps 44px targets and honors dark mode", async ({ page }) => {
@@ -340,7 +394,7 @@ test("fits 320px, keeps 44px targets and honors dark mode", async ({ page }) => 
   expect(overflow.body).toBeLessThanOrEqual(0);
 
   const heights = await page.evaluate(() =>
-    ["generate-submit", "input-clear", "result-copy", "result-clear", "position-select"].map(
+    ["generate-submit", "input-clear", "result-copy", "result-clear", "position-item"].map(
       (id) => {
         const node = document.querySelector('[data-testid="' + id + '"]');
         return { id, height: node.getBoundingClientRect().height };

@@ -5,6 +5,7 @@
 // no localStorage, sessionStorage, URL or IndexedDB copy of any of them.
 import { createCloudSession } from "./session.mjs";
 import { renderSafeMarkdown } from "./render.mjs";
+import { currentPath, renderLoginGate, setGuestMode } from "./gate.mjs";
 
 const POSITIONS_PATH = "/api/cloud/positions";
 const POSITION_TYPES = ["前端", "后端", "客户端", "测试"];
@@ -85,6 +86,7 @@ export function mountInterview(root, options = {}) {
     busy: false,
     result: "",
     files: [],
+    detailCollapsed: true,
   };
 
   let ui = null;
@@ -106,33 +108,19 @@ export function mountInterview(root, options = {}) {
     }
   }
 
-  function renderLoginGate() {
-    const gate = element(doc, "section", {
-      className: "status-panel login-gate",
-      "data-testid": "login-gate",
-    });
-    gate.append(
-      element(doc, "h1", {}, "职位与面试"),
-      element(
-        doc,
-        "p",
-        {},
-        "登录后可以管理职位，并私密、临时地生成面试题。简历、图片和生成结果不会保存。",
-      ),
-      element(
-        doc,
-        "a",
-        {
-          className: "btn btn--primary",
-          href: state.loginUrl || client.loginUrl(),
-          "data-testid": "login-link",
-        },
-        "登录后使用",
-      ),
-    );
+  function showLoginGate() {
+    state.loginRequired = true;
+    state.loginUrl = client.loginUrl();
+    state.session = null;
+    renderAccount();
+    const gate = renderLoginGate(doc, { next: currentPath(doc) });
     root.replaceChildren(gate);
     gate.setAttribute("tabindex", "-1");
-    gate.focus();
+    try {
+      gate.focus();
+    } catch {
+      // 焦点只是增强；登录卡片本身仍然可读。
+    }
   }
 
   function renderLoading() {
@@ -218,36 +206,23 @@ export function mountInterview(root, options = {}) {
         doc,
         "p",
         { className: "field-hint" },
-        "选择本次面试的职位；没有合适的职位时先新建一个。",
+        "点击职位标题查看详情；没有合适的职位时先新建一个。",
       ),
     );
 
-    const positionField = element(doc, "div", { className: "field" });
-    positionField.append(element(doc, "label", { for: "position-select" }, "选择职位"));
-    const positionSelect = element(doc, "select", {
-      id: "position-select",
-      "data-testid": "position-select",
+    // 左栏只放职位标题列表：不用下拉框，点击标题即在中栏展示详情。
+    const positionList = element(doc, "ul", {
+      className: "position-list",
+      "data-testid": "position-list",
+      "aria-label": "职位列表",
     });
-    positionField.append(positionSelect);
-    positionBody.append(positionField);
-
-    const selectedSummary = element(doc, "div", {
-      className: "position-summary",
-      "data-testid": "position-summary",
-      hidden: true,
-    });
-    selectedSummary.append(
-      element(doc, "p", { className: "position-summary-title", "data-testid": "selected-position-title" }),
-      element(doc, "p", {
-        className: "position-summary-meta",
-        "data-testid": "selected-position-type",
-      }),
-      element(doc, "p", {
-        className: "position-summary-requirements",
-        "data-testid": "selected-position-requirements",
-      }),
+    const positionEmpty = element(
+      doc,
+      "p",
+      { className: "field-hint position-empty", "data-testid": "position-empty", hidden: true },
+      "还没有职位，请先新建。",
     );
-    positionBody.append(selectedSummary);
+    positionBody.append(positionList, positionEmpty);
 
     const positionError = element(doc, "p", {
       className: "form-error",
@@ -255,16 +230,69 @@ export function mountInterview(root, options = {}) {
       role: "alert",
       hidden: true,
     });
-    positionBody.append(positionError);
 
+    // 中栏：职位详情；内容超过屏幕一半时折叠，并提供展开/折叠按钮。
+    const positionDetail = element(doc, "section", {
+      className: "panel interview-panel position-detail",
+      "data-testid": "position-detail",
+      "aria-labelledby": "position-detail-heading",
+      hidden: true,
+    });
+    const detailBody = element(doc, "div", { className: "panel-body" });
+    const detailHead = element(doc, "div", { className: "interview-section-head" });
+    const detailToggle = element(
+      doc,
+      "button",
+      {
+        className: "btn position-detail-toggle",
+        type: "button",
+        "data-testid": "position-detail-toggle",
+        "aria-controls": "position-detail-summary",
+        "aria-expanded": "false",
+        hidden: true,
+      },
+      "展开",
+    );
+    detailHead.append(element(doc, "h2", { id: "position-detail-heading" }, "职位信息"));
+
+    const selectedSummary = element(doc, "div", {
+      className: "position-summary",
+      id: "position-detail-summary",
+      "data-testid": "position-summary",
+    });
+    selectedSummary.append(
+      element(doc, "p", { className: "position-summary-title", "data-testid": "selected-position-title" }),
+      element(doc, "p", {
+        className: "position-summary-meta",
+        "data-testid": "selected-position-type",
+      }),
+      element(doc, "div", {
+        className: "position-summary-requirements",
+        "data-testid": "selected-position-requirements",
+      }),
+    );
+    // 展开/折叠放在详情卡片右下角，保持普通按钮大小。
+    const detailFoot = element(doc, "div", { className: "position-detail-foot" });
+    detailFoot.append(detailToggle);
+    detailBody.append(detailHead, selectedSummary, detailFoot);
+    positionDetail.append(detailBody);
+
+    // 中栏：新建职位表单（点击左栏「新建职位」时出现在中栏顶部）。
     const positionEditor = element(doc, "section", {
-      className: "position-editor",
+      className: "panel interview-panel position-editor",
       "data-testid": "position-editor",
       "aria-labelledby": "position-editor-title",
       hidden: true,
     });
-    positionEditor.append(
-      element(doc, "h3", { id: "position-editor-title" }, "新建职位"),
+    const positionEditorBody = element(doc, "div", { className: "panel-body" });
+    positionEditorBody.append(
+      element(doc, "h2", { id: "position-editor-title" }, "新建职位"),
+      element(
+        doc,
+        "p",
+        { className: "field-hint" },
+        "职位会保存，之后可直接复用；保存后表单关闭，职位详情显示在中栏。",
+      ),
     );
 
     const typeField = element(doc, "div", { className: "field" });
@@ -278,7 +306,7 @@ export function mountInterview(root, options = {}) {
       typeSelect.append(element(doc, "option", { value: type }, type));
     }
     typeField.append(typeSelect);
-    positionEditor.append(typeField);
+    positionEditorBody.append(typeField);
 
     const titleField = element(doc, "div", { className: "field" });
     titleField.append(element(doc, "label", { for: "position-title" }, "职位名称"));
@@ -291,7 +319,7 @@ export function mountInterview(root, options = {}) {
       autocomplete: "off",
     });
     titleField.append(titleInput);
-    positionEditor.append(titleField);
+    positionEditorBody.append(titleField);
 
     const requirementsField = element(doc, "div", { className: "field" });
     requirementsField.append(
@@ -311,7 +339,7 @@ export function mountInterview(root, options = {}) {
       required: true,
     });
     requirementsField.append(requirementsInput);
-    positionEditor.append(requirementsField);
+    positionEditorBody.append(requirementsField);
 
     const positionEditorActions = element(doc, "div", { className: "form-actions" });
     const positionSave = element(
@@ -327,10 +355,9 @@ export function mountInterview(root, options = {}) {
       "取消",
     );
     positionEditorActions.append(positionSave, positionCancel);
-    positionEditor.append(positionEditorActions);
-    positionBody.append(positionEditor);
+    positionEditorBody.append(positionError, positionEditorActions);
+    positionEditor.append(positionEditorBody);
     positionPanel.append(positionBody);
-    page.append(positionPanel);
 
     // ---- interview form ----
     const form = element(doc, "form", {
@@ -439,7 +466,6 @@ export function mountInterview(root, options = {}) {
     formActions.append(submit, clear);
     formBody.append(formError, formStatus, formActions);
     form.append(formBody);
-    page.append(form);
 
     // ---- result ----
     const resultPanel = element(doc, "section", {
@@ -484,15 +510,58 @@ export function mountInterview(root, options = {}) {
     resultActions.append(copy, clearResult);
     resultBody.append(resultHead, resultMeta, resultMarkdown, resultActions);
     resultPanel.append(resultBody);
-    page.append(resultPanel);
+
+    // 三栏：左栏职位列表，中栏职位详情/新建职位/候选人资料，右栏面试题。
+    const grid = element(doc, "div", { className: "page-grid page-grid--interview" });
+
+    const rail = element(doc, "aside", {
+      className: "page-rail",
+      "data-testid": "interview-rail",
+      "aria-label": "职位",
+    });
+    rail.append(positionPanel);
+
+    const main = element(doc, "div", {
+      className: "page-main",
+      "data-testid": "interview-main",
+    });
+    main.append(positionEditor, positionDetail, form);
+
+    const side = element(doc, "aside", {
+      className: "page-side",
+      "data-testid": "interview-side",
+      "aria-label": "面试题",
+    });
+    // 右栏常驻：未生成面试题时显示占位说明，保证三栏始终成立。
+    const resultPlaceholder = element(doc, "section", {
+      className: "panel interview-panel",
+      "data-testid": "result-placeholder",
+      "aria-labelledby": "result-placeholder-heading",
+    });
+    resultPlaceholder.append(
+      element(doc, "h2", { id: "result-placeholder-heading" }, "面试题"),
+      element(
+        doc,
+        "p",
+        { className: "field-hint" },
+        "填好岗位与候选人资料并生成后，面试题会显示在这一栏；同时可以复制全文或清空结果。",
+      ),
+    );
+    side.append(resultPanel, resultPlaceholder);
+
+    grid.append(rail, main, side);
+    page.append(grid);
 
     root.replaceChildren(page);
     root.setAttribute("tabindex", "-1");
 
     return {
       pageStatus,
-      positionSelect,
+      positionList,
+      positionEmpty,
       positionError,
+      positionDetail,
+      detailToggle,
       positionEditor,
       typeSelect,
       titleInput,
@@ -501,6 +570,7 @@ export function mountInterview(root, options = {}) {
       positionCancel,
       positionCreateOpen: positionHead.querySelector('[data-testid="position-create-open"]'),
       selectedSummary,
+      detailBody,
       selectedTitle: selectedSummary.querySelector('[data-testid="selected-position-title"]'),
       selectedType: selectedSummary.querySelector('[data-testid="selected-position-type"]'),
       selectedRequirements: selectedSummary.querySelector(
@@ -540,29 +610,38 @@ export function mountInterview(root, options = {}) {
 
   function renderPositions() {
     if (!ui) return;
-    ui.positionSelect.replaceChildren();
-    if (state.positions.length === 0) {
-      ui.positionSelect.append(
-        element(doc, "option", { value: "" }, "还没有职位，请先新建"),
-      );
-      ui.positionSelect.disabled = true;
-      ui.selectedSummary.hidden = true;
+    ui.positionList.replaceChildren();
+    const empty = state.positions.length === 0;
+    ui.positionEmpty.hidden = !empty;
+    if (empty) {
+      state.selectedId = "";
+      ui.positionDetail.hidden = true;
+      refreshDetailToggle();
       setStatus(ui.pageStatus, "还没有职位，先新建一个职位再生成面试题。");
       return;
     }
-    ui.positionSelect.disabled = false;
     if (!selectedPosition()) state.selectedId = state.positions[0].id;
     for (const position of state.positions) {
-      ui.positionSelect.append(
-        element(
-          doc,
-          "option",
-          { value: position.id, selected: position.id === state.selectedId },
-          position.title + "（" + position.type + "）",
-        ),
+      const selected = position.id === state.selectedId;
+      const item = element(doc, "li", { className: "position-list-item" });
+      const button = element(
+        doc,
+        "button",
+        {
+          className: "position-item" + (selected ? " is-selected" : ""),
+          type: "button",
+          "data-testid": "position-item",
+          "data-position-id": position.id,
+          "aria-current": selected ? "true" : null,
+        },
       );
+      button.append(
+        element(doc, "span", { className: "position-item-title" }, position.title),
+        element(doc, "span", { className: "position-item-type" }, position.type),
+      );
+      item.append(button);
+      ui.positionList.append(item);
     }
-    ui.positionSelect.value = state.selectedId;
     renderSelectedPosition();
     setStatus(ui.pageStatus, "");
   }
@@ -570,20 +649,71 @@ export function mountInterview(root, options = {}) {
   function renderSelectedPosition() {
     const position = selectedPosition();
     if (!position) {
-      ui.selectedSummary.hidden = true;
+      ui.positionDetail.hidden = true;
+      refreshDetailToggle();
       return;
     }
-    ui.selectedSummary.hidden = false;
+    ui.positionDetail.hidden = false;
     ui.selectedTitle.textContent = position.title;
     ui.selectedType.textContent = "职位类型：" + position.type;
     ui.selectedRequirements.textContent = position.requirements;
+    refreshDetailToggle();
+  }
+
+  // 详情超过视口一半时折叠；否则整段展示且不显示展开/折叠按钮。
+  function refreshDetailToggle() {
+    if (!ui) return;
+    const summary = ui.selectedSummary;
+    const toggle = ui.detailToggle;
+    if (ui.positionDetail.hidden || !state.selectedId) {
+      toggle.hidden = true;
+      toggle.textContent = "展开";
+      toggle.setAttribute("aria-expanded", "false");
+      summary.style.maxHeight = "";
+      summary.classList.remove("is-clamped");
+      return;
+    }
+    const limit = Math.max(160, Math.round((win.innerHeight || 800) / 2));
+    summary.style.maxHeight = "none";
+    const natural = summary.scrollHeight;
+    if (natural <= limit) {
+      toggle.hidden = true;
+      toggle.textContent = "展开";
+      toggle.setAttribute("aria-expanded", "false");
+      summary.style.maxHeight = "";
+      summary.classList.remove("is-clamped");
+      return;
+    }
+    toggle.hidden = false;
+    if (state.detailCollapsed) {
+      summary.style.maxHeight = limit + "px";
+      summary.classList.add("is-clamped");
+      toggle.textContent = "展开";
+      toggle.setAttribute("aria-expanded", "false");
+    } else {
+      summary.style.maxHeight = "none";
+      summary.classList.remove("is-clamped");
+      toggle.textContent = "折叠";
+      toggle.setAttribute("aria-expanded", "true");
+    }
+  }
+
+  function focusSelectedPosition() {
+    const selected = ui.positionList.querySelector('[aria-current="true"]');
+    if (selected) selected.focus();
   }
 
   function showPositionEditor(show) {
     ui.positionEditor.hidden = !show;
     setError(ui.positionError, "");
     if (show) {
+      state.detailCollapsed = true;
       ui.typeSelect.focus();
+      try {
+        ui.positionEditor.scrollIntoView({ block: "nearest" });
+      } catch {
+        // 滚动只是增强；表单已经可见。
+      }
     } else {
       ui.positionCreateOpen.focus();
     }
@@ -700,13 +830,10 @@ export function mountInterview(root, options = {}) {
       renderPositions();
       showPositionEditor(false);
       setStatus(ui.pageStatus, "职位已保存。");
-      ui.positionSelect.focus();
+      focusSelectedPosition();
     } catch (error) {
       if (error && error.status === 401) {
-        state.loginRequired = true;
-        state.loginUrl = client.loginUrl();
-        renderAccount();
-        renderLoginGate();
+        showLoginGate();
         return;
       }
       setError(ui.positionError, errorText(error));
@@ -724,7 +851,8 @@ export function mountInterview(root, options = {}) {
     const position = selectedPosition();
     if (!position) {
       setError(ui.formError, "请先选择或新建一个职位。");
-      ui.positionSelect.focus();
+      focusSelectedPosition();
+      if (!state.selectedId) ui.positionCreateOpen.focus();
       return;
     }
     const resume = ui.resumeInput.value;
@@ -768,10 +896,7 @@ export function mountInterview(root, options = {}) {
       ui.resultPanel.focus();
     } catch (error) {
       if (error && error.status === 401) {
-        state.loginRequired = true;
-        state.loginUrl = client.loginUrl();
-        renderAccount();
-        renderLoginGate();
+        showLoginGate();
         return;
       }
       if (error && error.name === "RangeError") {
@@ -793,11 +918,29 @@ export function mountInterview(root, options = {}) {
     });
     ui.positionCancel.addEventListener("click", () => showPositionEditor(false));
     ui.positionSave.addEventListener("click", createPosition);
-    ui.positionSelect.addEventListener("change", () => {
-      state.selectedId = ui.positionSelect.value;
-      renderSelectedPosition();
+    ui.positionList.addEventListener("click", (event) => {
+      const target = event.target instanceof win.Element
+        ? event.target.closest('[data-testid="position-item"]')
+        : null;
+      if (!target) return;
+      const id = target.getAttribute("data-position-id");
+      if (!id || id === state.selectedId) {
+        focusSelectedPosition();
+        return;
+      }
+      state.selectedId = id;
+      state.detailCollapsed = true;
+      renderPositions();
       setError(ui.formError, "");
+      focusSelectedPosition();
     });
+    ui.detailToggle.addEventListener("click", () => {
+      state.detailCollapsed = !state.detailCollapsed;
+      refreshDetailToggle();
+    });
+    if (typeof win.addEventListener === "function") {
+      win.addEventListener("resize", () => refreshDetailToggle());
+    }
     ui.resumeInput.addEventListener("input", () => {
       ui.resumeCounter.textContent = ui.resumeInput.value.length + " / " + RESUME_MAX_CHARS;
     });
@@ -841,10 +984,7 @@ export function mountInterview(root, options = {}) {
       renderPositions();
     } catch (error) {
       if (error && error.status === 401) {
-        state.loginRequired = true;
-        state.loginUrl = client.loginUrl();
-        renderAccount();
-        renderLoginGate();
+        showLoginGate();
         return;
       }
       setStatus(ui.pageStatus, "");
@@ -855,10 +995,16 @@ export function mountInterview(root, options = {}) {
   async function boot() {
     renderLoading();
     try {
+      // 会话检查先于业务 UI：没有会话就只显示登录卡片。
       const session = await client.session();
+      if (!session) {
+        showLoginGate();
+        return;
+      }
       state.session = session;
       state.loginRequired = false;
       state.loginUrl = client.loginUrl();
+      setGuestMode(doc, false);
       renderAccount();
       if (!ui) {
         ui = buildPage();
@@ -869,10 +1015,7 @@ export function mountInterview(root, options = {}) {
       await loadPositions();
     } catch (error) {
       if (error && error.status === 401) {
-        state.loginRequired = true;
-        state.loginUrl = client.loginUrl();
-        renderAccount();
-        renderLoginGate();
+        showLoginGate();
         return;
       }
       renderFatal("无法连接服务，请稍后重试。");
