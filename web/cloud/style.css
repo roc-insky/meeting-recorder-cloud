@@ -1477,10 +1477,10 @@ textarea {
   font-size: 13px;
 }
 
-.result-panel .markdown {
+.page-grid--interview .page-side .result-panel .markdown {
   max-height: 62vh;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -1488,37 +1488,65 @@ textarea {
   overscroll-behavior: contain;
 }
 
-.result-panel .markdown h1,
-.result-panel .markdown h2,
-.result-panel .markdown h3 {
-  padding-left: 10px;
-  border-left: 3px solid var(--primary);
+.page-grid--interview .page-side .result-panel .markdown h1,
+.page-grid--interview .page-side .result-panel .markdown h2,
+.page-grid--interview .page-side .result-panel .markdown h3 {
+  margin: 20px 0 10px;
+  font-weight: 700;
   line-height: 1.4;
 }
 
-.result-panel .markdown h1 {
+.page-grid--interview .page-side .result-panel .markdown h1 {
   font-size: 20px;
+  padding: 0 0 12px;
+  border-left: none;
+  border-bottom: 1px solid var(--border);
 }
 
-.result-panel .markdown h2 {
+.page-grid--interview .page-side .result-panel .markdown h2 {
   font-size: 17px;
+  padding-left: 10px;
+  border-left: 3px solid var(--primary);
 }
 
-.result-panel .markdown h3 {
+.page-grid--interview .page-side .result-panel .markdown h3 {
   font-size: 15px;
-  border-left-color: var(--border);
+  padding-left: 0;
+  border-left: none;
 }
 
-.result-panel .markdown ul,
-.result-panel .markdown ol {
+.page-grid--interview .page-side .result-panel .markdown h1:first-child,
+.page-grid--interview .page-side .result-panel .markdown h2:first-child,
+.page-grid--interview .page-side .result-panel .markdown h3:first-child {
+  margin-top: 0;
+}
+
+.page-grid--interview .page-side .result-panel .markdown p {
+  margin: 0 0 14px;
+  line-height: 1.75;
+}
+
+.page-grid--interview .page-side .result-panel .markdown strong {
+  color: var(--primary);
+  font-weight: 700;
+}
+
+@media (max-width: 480px) {
+  .page-grid--interview .page-side .result-panel .markdown {
+    padding: 16px;
+  }
+}
+
+.page-grid--interview .page-side .result-panel .markdown ul,
+.page-grid--interview .page-side .result-panel .markdown ol {
   padding-left: 1.4em;
 }
 
-.result-panel .markdown li + li {
-  margin-top: 6px;
+.page-grid--interview .page-side .result-panel .markdown li + li {
+  margin-top: 8px;
 }
 
-.result-panel .markdown blockquote {
+.page-grid--interview .page-side .result-panel .markdown blockquote {
   margin: 0 0 12px;
   padding: 8px 12px;
   border-left: 3px solid var(--border);
@@ -1527,7 +1555,7 @@ textarea {
   border-radius: 0 var(--radius) var(--radius) 0;
 }
 
-.result-panel .markdown hr {
+.page-grid--interview .page-side .result-panel .markdown hr {
   border: none;
   border-top: 1px solid var(--border);
   margin: 14px 0;

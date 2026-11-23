@@ -177,6 +177,75 @@ for (const width of [1440, 768, 390, 480, 481]) {
   });
 }
 
+// Catches shared Markdown rules flattening heading and explanation hierarchy.
+test("sidebar markdown hierarchy and explanation styles", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockApi(page, { interviewBody: { markdown: DEFAULT_MARKDOWN + "\n\n**解释方案：**逐步说明定位过程。\n\n- 定位\n- 修复" } });
+  await openInterview(page);
+  await generate(page);
+  const result = page.getByTestId("result-markdown");
+  await expect(result).toHaveCSS("padding", "20px");
+  await expect(result).toHaveCSS("max-height", "558px");
+  for (const [tag, size, left, top] of [["h1", "20px", "0px", "0px"], ["h2", "17px", "3px", "20px"], ["h3", "15px", "0px", "20px"]]) {
+    const heading = result.locator(tag);
+    await expect(heading).toHaveCSS("font-size", size);
+    await expect(heading).toHaveCSS("font-weight", "700");
+    await expect(heading).toHaveCSS("border-left-width", left);
+    await expect(heading).toHaveCSS("margin-top", top);
+    await expect(heading).toHaveCSS("margin-bottom", "10px");
+  }
+  await expect(result.locator("h1")).toHaveCSS("border-bottom-width", "1px");
+  await expect(result.locator("h1")).toHaveCSS("padding-bottom", "12px");
+  await expect(result.locator("h3")).toHaveCSS("padding-left", "0px");
+  const primary = await page.locator("html").evaluate(el => getComputedStyle(el).getPropertyValue("--primary").trim());
+  for (const label of await result.locator("strong").all()) {
+    await expect(label).toHaveCSS("font-weight", "700");
+    expect(await label.evaluate((el, color) => {
+      const probe = document.createElement("span");
+      probe.style.color = color; el.append(probe);
+      const matches = getComputedStyle(el).color === getComputedStyle(probe).color;
+      probe.remove(); return matches;
+    }, primary)).toBe(true);
+  }
+  await expect(result.locator("p").first()).toHaveCSS("margin-bottom", "14px");
+  await expect(result.locator("li + li").first()).toHaveCSS("margin-top", "8px");
+});
+
+// Catches long tokens widening the page, lost inner scrolling, and modified copy text.
+for (const colorScheme of ["light", "dark"]) {
+  for (const width of [1440, 768, 390]) {
+    test("sidebar handles long content and themes without page overflow " + colorScheme + " " + width, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.emulateMedia({ colorScheme });
+      await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", {
+        configurable: true, value: { writeText: async (text) => { window.__copiedText = text; } },
+      }));
+      const markdown = [DEFAULT_MARKDOWN, "## " + "长中文标题".repeat(20), "x".repeat(500),
+        "https://example.com/" + "a".repeat(500), "\x60\x60\x60\n" + "x".repeat(200) + "\n\x60\x60\x60",
+        ...Array.from({ length: 100 }, (_, i) => "### " + (i + 1) + ". 排查问题\n\n**解释方案：**说明定位与修复过程。")].join("\n\n");
+      await mockApi(page, { interviewBody: { markdown } });
+      await openInterview(page);
+      const hint = page.locator(".interview-result-hint");
+      await expect(hint).toHaveCSS("background-color", colorScheme === "light" ? "rgb(237, 241, 238)" : "rgb(34, 48, 40)");
+      await page.getByTestId("interview-side").screenshot({ path: testInfo.outputPath("placeholder.png") });
+      await generate(page);
+      const result = page.getByTestId("result-markdown");
+      await expect(result).toHaveCSS("padding", width <= 480 ? "16px" : "20px");
+      await expect(result.locator("strong").first()).toHaveCSS("color", colorScheme === "light" ? "rgb(15, 118, 110)" : "rgb(94, 234, 212)");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      expect(await result.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+      expect(await result.locator("pre").evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+      await page.getByTestId("interview-side").screenshot({ path: testInfo.outputPath("generated.png") });
+      expect(await result.evaluate(el => { el.scrollTop = el.scrollHeight; return el.scrollTop; })).toBeGreaterThan(0);
+      await page.getByTestId("result-copy").click();
+      expect(await page.evaluate(() => window.__copiedText)).toBe(markdown);
+      await page.getByTestId("result-clear").click();
+      await expect(page.getByTestId("result-placeholder")).toBeVisible();
+      await expect(page.getByTestId("result-panel")).not.toBeVisible();
+    });
+  }
+}
+
 test("renders untrusted markdown inert and only permits http(s) links", async ({ page }) => {
   const state = await mockApi(page);
   state.interviewBody = {
