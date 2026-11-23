@@ -538,15 +538,17 @@ export function mountInterview(root, options = {}) {
       "data-testid": "result-placeholder",
       "aria-labelledby": "result-placeholder-heading",
     });
-    resultPlaceholder.append(
+    const placeholderBody = element(doc, "div", { className: "panel-body" });
+    placeholderBody.append(
       element(doc, "h2", { id: "result-placeholder-heading" }, "面试题"),
       element(
         doc,
         "p",
-        { className: "field-hint" },
+        { className: "field-hint interview-result-hint" },
         "填好岗位与候选人资料并生成后，面试题会显示在这一栏；同时可以复制全文或清空结果。",
       ),
     );
+    resultPlaceholder.append(placeholderBody);
     side.append(resultPanel, resultPlaceholder);
 
     grid.append(rail, main, side);

@@ -1443,11 +1443,36 @@ textarea {
 }
 
 /* 右栏面试题：卡片化 + 可滚动正文 */
-.result-panel .panel-body {
+.page-grid--interview .page-side .panel-body {
+  padding: 24px;
   gap: 12px;
 }
 
-.result-panel .form-status {
+.page-grid--interview .page-side .panel-body > h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.page-grid--interview .page-side .interview-result-hint {
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--muted-bg);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .page-grid--interview .page-side .panel-body {
+    padding: 16px;
+  }
+}
+
+.page-grid--interview .page-side .result-panel .form-status {
   color: var(--success);
   font-size: 13px;
 }

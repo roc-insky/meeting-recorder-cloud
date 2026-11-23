@@ -146,6 +146,37 @@ async function generate(page) {
   await expect(page.getByTestId("result-panel")).toBeVisible();
 }
 
+// Catches missing card padding and mobile overrides leaking into the sidebar.
+for (const width of [1440, 768, 390, 480, 481]) {
+  test("sidebar cards preserve spacing across empty generated and cleared states at " + width, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await mockApi(page);
+    await openInterview(page);
+    const placeholder = page.getByTestId("result-placeholder");
+    const result = page.getByTestId("result-panel");
+    const padding = width <= 480 ? "16px" : "24px";
+    const checkCard = async (card, heading) => {
+      await expect(card).toBeVisible();
+      const body = card.locator(".panel-body");
+      for (const edge of ["top", "right", "bottom", "left"]) {
+        await expect(body).toHaveCSS("padding-" + edge, padding);
+      }
+      await expect(body).toHaveCSS("gap", "12px");
+      await expect(page.locator(heading)).toHaveCSS("font-size", "20px");
+      await expect(page.locator(heading)).toHaveCSS("font-weight", "700");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    };
+    await checkCard(placeholder, "#result-placeholder-heading");
+    await expect(placeholder.locator(".interview-result-hint")).toHaveCSS("line-height", "24.5px");
+    await generate(page);
+    await expect(placeholder).not.toBeVisible();
+    await checkCard(result, "#result-heading");
+    await page.getByTestId("result-clear").click();
+    await expect(result).not.toBeVisible();
+    await checkCard(placeholder, "#result-placeholder-heading");
+  });
+}
+
 test("renders untrusted markdown inert and only permits http(s) links", async ({ page }) => {
   const state = await mockApi(page);
   state.interviewBody = {
