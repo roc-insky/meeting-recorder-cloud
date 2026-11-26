@@ -9,7 +9,11 @@ const TASK_POLL_MS = 1000;
 const MIME_CANDIDATES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
 
 const TASK_ERROR_TEXT = {
-  voiceprint_extraction_failed: "未能从录音中提取声纹，请确认录音清晰后重试。",
+  voiceprint_extraction_failed:
+    "未能从录音中提取声纹：请在安静环境照着提示朗读至少 15 秒（有效语音不足 10 秒会失败）后重试。",
+  no_voiceprint_processor: "声纹处理服务未启动，请联系管理员后重试。",
+  processing_failed: "声纹处理服务出错，请稍后重试。",
+  voiceprint_sample_missing: "录音样本已丢失，请重新录音。",
   invalid_voiceprint_audio: "录音无效，请重新录制。",
   voiceprint_sample_too_large: "录音文件过大，请缩短录音后重试。",
   unsupported_voiceprint_media: "浏览器生成的录音格式不受支持，请更新浏览器后重试。",
@@ -992,6 +996,12 @@ export function mountVoiceprints(root, options = {}) {
         setEnrollStatus("");
       } else if (isRequestError(problem) && problem.status === 409) {
         showEnrollError("声纹版本已变化，请刷新列表后重新开始替换。");
+      } else if (isRequestError(problem) && problem.status === 503) {
+        showEnrollError("声纹服务暂未配置完成（" + (errorCode(problem) || "503") + "），请联系管理员。");
+      } else if (isRequestError(problem) && problem.status === 413) {
+        showEnrollError(taskErrorText("voiceprint_sample_too_large"));
+      } else if (isRequestError(problem) && problem.status === 415) {
+        showEnrollError(taskErrorText("unsupported_voiceprint_media"));
       } else {
         showEnrollError("未能保存声纹，请重新录音或稍后再试。");
       }

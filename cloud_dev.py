@@ -23,6 +23,9 @@ DEFAULTS = {
     "CLOUD_DATABASE_URL": "postgresql+psycopg://mima0000@127.0.0.1:55432/cloud_test",
     "CLOUD_SECRET_KEY": "dev-only-secret-key-not-for-production-0123456789",
     "CLOUD_ENVIRONMENT": "development",
+    # 声纹样本/向量的 AES-GCM 密钥（32 字节 base64url）。没有它 POST /voiceprints 直接 503
+    # voiceprint_key_missing；仅开发用，生产由 deploy/cloud/compose.yml 强制提供真实密钥。
+    "CLOUD_VOICEPRINT_KEY": "ZGV2LW9ubHktdm9pY2VwcmludC1rZXktMDEyMzQ1Njc",
     "CLOUD_AUTH_PROVIDER": "fake_test",
     "CLOUD_COOKIE_SECURE": "false",     # http://127.0.0.1 上 Secure Cookie 不会被浏览器保存
     "CLOUD_HOST": "127.0.0.1",

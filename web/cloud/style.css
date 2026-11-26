@@ -1191,6 +1191,32 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.read-script {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 6px;
+  background: var(--muted-bg);
+}
+
+.read-script h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.read-script-text {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.read-script .field-hint {
+  margin: 0;
+}
+
 .record-line {
   display: flex;
   flex-wrap: wrap;

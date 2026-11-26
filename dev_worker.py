@@ -37,12 +37,20 @@ PROJECT_DIR = Path(__file__).resolve().parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from cloud.contracts import AuthContext, Segment, TranscriptView  # noqa: E402
+from cloud.app import SystemClock  # noqa: E402
+from cloud.contracts import (  # noqa: E402
+    AuthContext,
+    Embedding,
+    ModelMetadata,
+    Segment,
+    TranscriptView,
+)
 from cloud.db import create_database_engine, make_session_factory  # noqa: E402
 from cloud.models import EnhancementError, RecognitionParams  # noqa: E402
 from cloud.objects import object_store_from_env  # noqa: E402
 from cloud.settings import Settings  # noqa: E402
 from cloud.transcripts import transcribe_task  # noqa: E402
+from cloud.voiceprints import process_voiceprint_task  # noqa: E402
 from cloud.worker import WorkItem, process_once  # noqa: E402
 
 WORKER_ID = "dev-worker"
@@ -146,6 +154,104 @@ def make_processor(settings: Settings, session_factory, objects) -> "Callable[[W
     return processor
 
 
+class DevVoiceprintExtractor:
+    """开发用声纹提取器：ffmpeg 解码成 16 kHz 单声道 → 本机 3D-Speaker ERes2Net 嵌入。
+
+    process_voiceprint_task 只认 extract(audio_bytes) -> Embedding；失败一律抛异常，
+    由它折成固定错误码 voiceprint_extraction_failed（不持久化异常文本）。
+    复用 voiceprint.enroll_vector：去静音后按 3 秒切块取向量再平均，有效语音不足
+    10 秒会抛 VoiceprintError，所以前端提示让用户至少读 15 秒。
+    """
+
+    MODEL_ID = "3dspeaker-eres2net-large-sv-zh-cn-16k"
+    DIMENSION = 512
+
+    _extractor = None
+    _weights_sha256: str | None = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def _load(cls):
+        with cls._lock:
+            if cls._extractor is None:
+                import hashlib
+
+                import diarize
+                import voiceprint
+
+                extractor = voiceprint.default_extractor()
+                digest = hashlib.sha256()
+                with open(diarize.MODEL_DIR / diarize.EMBEDDING_FILE, "rb") as handle:
+                    for block in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(block)
+                cls._weights_sha256 = digest.hexdigest()
+                cls._extractor = extractor
+        return cls._extractor, cls._weights_sha256
+
+    @staticmethod
+    def _decode(audio: bytes) -> np.ndarray:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "16000",
+                "-f", "s16le", "pipe:1",
+            ],
+            input=audio,
+            capture_output=True,
+            timeout=60,
+            check=True,
+        )
+        return np.frombuffer(proc.stdout, dtype=np.int16)
+
+    def extract(self, audio: bytes) -> Embedding:
+        import voiceprint
+
+        extractor, weights = self._load()
+        samples = self._decode(audio)
+        vector, _chunks, _seconds = voiceprint.enroll_vector(samples, extractor=extractor)
+        return Embedding(
+            vector=[float(value) for value in vector],
+            metadata=ModelMetadata(
+                model_id=self.MODEL_ID,
+                model_version="1",
+                weights_sha256=weights,
+                dimension=self.DIMENSION,
+                sample_rate=16000,
+                preprocess_version="dev-ffmpeg-16k-mono-vad-3s-chunks",
+                normalization_version="l2-mean",
+                calibration_version="none",
+            ),
+        )
+
+
+def make_voiceprint_processor(settings: Settings, session_factory, objects):  # noqa: ANN001, ANN201
+    """返回 process_once 需要的 voiceprint_processor(item)（worker 无 context 时只传 item）。"""
+    extractor = DevVoiceprintExtractor()
+
+    def processor(item: WorkItem) -> bool:
+        db = session_factory()
+        try:
+            ctx = AuthContext(
+                user_id=item.owner_user_id,
+                session_id="",
+                db=db,
+                clock=SystemClock(),
+                settings=settings,
+                objects=objects,
+            )
+            try:
+                return process_voiceprint_task(ctx, item, extractor=extractor)
+            except Exception:  # noqa: BLE001 - dev 输出完整栈
+                traceback.print_exc()
+                raise
+        finally:
+            db.close()
+
+    return processor
+
+
 def warm_up() -> None:
     """后台加载一次模型：首个任务的首次推理要 70 秒以上，容易撞上租约。"""
     try:
@@ -166,6 +272,7 @@ def run_forever(settings: Settings | None = None) -> None:
         print("dev_worker_no_object_store: set CLOUD_OBJECTS_DIR", flush=True)
         return
     processor = make_processor(settings, factory, objects)
+    voiceprint_processor = make_voiceprint_processor(settings, factory, objects)
     print("dev_worker_started", flush=True)
     try:
         while True:
@@ -177,6 +284,7 @@ def run_forever(settings: Settings | None = None) -> None:
                     now=datetime.now(timezone.utc),
                     db=db,
                     settings=settings,
+                    voiceprint_processor=voiceprint_processor,
                 )
             finally:
                 db.close()
